@@ -57,7 +57,8 @@ if exist "%ZIG_FOLDER%\zig.exe" (
 echo.
 echo Building Graphene Kernel...
 echo.
-"%ZIG_FOLDER%\zig.exe" build %*
+:: Use ReleaseSafe by default (Debug mode has ubsan issues with soft_float)
+"%ZIG_FOLDER%\zig.exe" build -Doptimize=ReleaseSafe %*
 
 if errorlevel 1 (
     echo.

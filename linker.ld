@@ -1,41 +1,37 @@
 /* Graphene Kernel Linker Script for Limine */
 
 OUTPUT_FORMAT(elf64-x86-64)
-ENTRY(kernel_main)
-
-/* Higher half virtual address */
-KERNEL_VIRT = 0xffffffff80000000;
+ENTRY(_start)
 
 PHDRS {
-    limine_requests PT_LOAD FLAGS(6); /* rw- for Limine requests */
-    text    PT_LOAD FLAGS(5); /* r-x */
-    rodata  PT_LOAD FLAGS(4); /* r-- */
-    data    PT_LOAD FLAGS(6); /* rw- */
+    limine_requests PT_LOAD;
+    text PT_LOAD;
+    rodata PT_LOAD;
+    data PT_LOAD;
 }
 
 SECTIONS {
-    . = KERNEL_VIRT;
+    . = 0xffffffff80000000;
 
-    /* Limine requests must be in their own section */
     .limine_requests : {
         KEEP(*(.limine_requests_start))
         KEEP(*(.limine_requests))
         KEEP(*(.limine_requests_end))
     } :limine_requests
 
-    . = ALIGN(4096);
+    . = ALIGN(CONSTANT(MAXPAGESIZE));
 
     .text : {
         *(.text .text.*)
     } :text
 
-    . = ALIGN(4096);
+    . = ALIGN(CONSTANT(MAXPAGESIZE));
 
     .rodata : {
         *(.rodata .rodata.*)
     } :rodata
 
-    . = ALIGN(4096);
+    . = ALIGN(CONSTANT(MAXPAGESIZE));
 
     .data : {
         *(.data .data.*)
@@ -47,8 +43,7 @@ SECTIONS {
     } :data
 
     /DISCARD/ : {
-        *(.comment)
-        *(.note*)
         *(.eh_frame*)
+        *(.note*)
     }
 }

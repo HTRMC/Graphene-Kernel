@@ -1,13 +1,21 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    // Freestanding x86_64 target for kernel
-    const target = b.resolveTargetQuery(.{
+    // Freestanding x86_64 target for kernel (matches limine-zig-template)
+    var query: std.Target.Query = .{
         .cpu_arch = .x86_64,
         .os_tag = .freestanding,
         .abi = .none,
-    });
+    };
 
+    // Disable SIMD features that require state saving in kernel mode
+    // Keep x87 FPU enabled as compiler-rt may need it
+    // The template adds popcnt and soft_float, and subtracts only SIMD features
+    const Target = std.Target.x86;
+    query.cpu_features_add = Target.featureSet(&.{ .popcnt, .soft_float });
+    query.cpu_features_sub = Target.featureSet(&.{ .avx, .avx2, .sse, .sse2, .mmx });
+
+    const target = b.resolveTargetQuery(query);
     const optimize = b.standardOptimizeOption(.{});
 
     // Create root module for kernel
@@ -15,10 +23,11 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
-        .code_model = .kernel,
-        .stack_protector = false,
-        .red_zone = false,
     });
+
+    // Set kernel-specific options (must be set after module creation)
+    kernel_module.red_zone = false;
+    kernel_module.code_model = .kernel;
 
     // Kernel executable
     const kernel = b.addExecutable(.{
@@ -28,6 +37,9 @@ pub fn build(b: *std.Build) void {
 
     // Use custom linker script
     kernel.setLinkerScript(b.path("linker.ld"));
+
+    // Enable verbose linking to debug
+    kernel.verbose_link = true;
 
     // Install the kernel binary
     b.installArtifact(kernel);
