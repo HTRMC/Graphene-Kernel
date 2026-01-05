@@ -1,4 +1,4 @@
-const limine = @import("limine");
+const limine = @import("limine.zig");
 
 var fb_addr: [*]u32 = undefined;
 var fb_width: u32 = 0;

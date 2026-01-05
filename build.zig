@@ -10,27 +10,27 @@ pub fn build(b: *std.Build) void {
 
     const optimize = b.standardOptimizeOption(.{});
 
-    // Kernel executable
-    const kernel = b.addExecutable(.{
-        .name = "graphene",
+    // Create root module for kernel
+    const kernel_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
         .code_model = .kernel,
+        .stack_protector = false,
+        .red_zone = false,
     });
 
-    // Disable stack protector (not available in freestanding)
-    kernel.root_module.stack_protector = false;
+    // Kernel executable
+    const kernel = b.addExecutable(.{
+        .name = "graphene",
+        .root_module = kernel_module,
+    });
 
     // Use custom linker script
     kernel.setLinkerScript(b.path("linker.ld"));
 
     // Install the kernel binary
     b.installArtifact(kernel);
-
-    // Limine bootloader dependency
-    const limine = b.dependency("limine", .{});
-    kernel.root_module.addImport("limine", limine.module("limine"));
 
     // Build ISO step
     const iso_cmd = b.addSystemCommand(&.{

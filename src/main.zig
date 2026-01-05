@@ -1,10 +1,13 @@
-const limine = @import("limine");
+const limine = @import("lib/limine.zig");
 const framebuffer = @import("lib/framebuffer.zig");
 
-// Limine requests - these are read by the bootloader
-pub export var base_revision: limine.BaseRevision = .{ .revision = 3 };
+// Limine request markers and requests - placed in special section
+export var requests_start linksection(".limine_requests_start") = limine.RequestsStartMarker{};
+export var requests_end linksection(".limine_requests_end") = limine.RequestsEndMarker{};
 
-pub export var framebuffer_request: limine.FramebufferRequest = .{};
+// Limine requests - these are read by the bootloader
+pub export var base_revision linksection(".limine_requests") = limine.BaseRevision{ .revision = 3 };
+pub export var framebuffer_request linksection(".limine_requests") = limine.FramebufferRequest{};
 
 // Kernel entry point
 export fn kernel_main() noreturn {
@@ -15,8 +18,9 @@ export fn kernel_main() noreturn {
 
     // Get framebuffer
     if (framebuffer_request.response) |fb_response| {
-        if (fb_response.framebuffer_count > 0) {
-            const fb = fb_response.framebuffers()[0];
+        const fbs = fb_response.framebuffers();
+        if (fbs.len > 0) {
+            const fb = fbs[0];
             framebuffer.init(fb);
             framebuffer.clear(0x001a1a2e); // Dark blue background
 

@@ -1,14 +1,10 @@
-.{
+.
+{
     .name = .graphene_kernel,
     .version = "0.1.0",
-    .fingerprint = 0xdeadbeef12345678,
+    .fingerprint = 0x1a3c522f0a8cbe8c,
     .minimum_zig_version = "0.14.0",
-    .dependencies = .{
-        .limine = .{
-            .url = "git+https://github.com/limine-bootloader/limine-zig#v8.x-binary",
-            .hash = "limine-1.2.3", // Will be updated after first fetch
-        },
-    },
+    .dependencies = .{},
     .paths = .{
         "build.zig",
         "build.zig.zon",
