@@ -9,8 +9,8 @@ export var requests_end linksection(".limine_requests_end") = limine.RequestsEnd
 pub export var base_revision linksection(".limine_requests") = limine.BaseRevision{ .revision = 3 };
 pub export var framebuffer_request linksection(".limine_requests") = limine.FramebufferRequest{};
 
-// Kernel entry point
-export fn kernel_main() noreturn {
+// Kernel entry point (must match linker ENTRY)
+export fn _start() callconv(.c) noreturn {
     // Verify Limine protocol version
     if (!base_revision.is_supported()) {
         halt();
