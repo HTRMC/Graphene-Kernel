@@ -7,7 +7,6 @@ cd /D "%~dp0"
 :: Read Zig version from .zigversion file
 set /p ZIG_VERSION=<.zigversion
 set ZIG_FOLDER=compiler\zig
-set ZIG_ARCHIVE=zig-x86_64-windows-%ZIG_VERSION%
 
 :: Check if compiler exists
 if exist "%ZIG_FOLDER%\zig.exe" (
@@ -18,9 +17,21 @@ if exist "%ZIG_FOLDER%\zig.exe" (
     :: Create compiler directory
     if not exist compiler mkdir compiler
 
+    :: Determine URL based on version type (dev vs release)
+    echo %ZIG_VERSION% | findstr /C:"dev" >nul
+    if !errorlevel! equ 0 (
+        :: Dev version - use builds URL
+        set ZIG_ARCHIVE=zig-x86_64-windows-%ZIG_VERSION%
+        set ZIG_URL=https://ziglang.org/builds/!ZIG_ARCHIVE!.zip
+    ) else (
+        :: Release version - use download URL
+        set ZIG_ARCHIVE=zig-x86_64-windows-%ZIG_VERSION%
+        set ZIG_URL=https://ziglang.org/download/%ZIG_VERSION%/!ZIG_ARCHIVE!.zip
+    )
+
     :: Download Zig
-    echo Downloading Zig...
-    curl -L -o "compiler\zig.zip" "https://ziglang.org/builds/%ZIG_ARCHIVE%.zip"
+    echo Downloading Zig from !ZIG_URL!...
+    curl -L -o "compiler\zig.zip" "!ZIG_URL!"
 
     if errorlevel 1 (
         echo Failed to download Zig compiler!
@@ -32,8 +43,8 @@ if exist "%ZIG_FOLDER%\zig.exe" (
     tar -xf "compiler\zig.zip" -C compiler
 
     :: Rename folder
-    if exist "compiler\%ZIG_ARCHIVE%" (
-        ren "compiler\%ZIG_ARCHIVE%" zig
+    if exist "compiler\!ZIG_ARCHIVE!" (
+        ren "compiler\!ZIG_ARCHIVE!" zig
     )
 
     :: Clean up
@@ -50,6 +61,6 @@ echo.
 
 if errorlevel 1 (
     echo.
-    echo Build failed!
+    echo Build failed
     exit /b 1
 )
