@@ -5,6 +5,9 @@ const std = @import("std");
 const gdt = @import("gdt.zig");
 const framebuffer = @import("framebuffer.zig");
 const pic = @import("pic.zig");
+const scheduler = @import("scheduler.zig");
+const syscall = @import("syscall.zig");
+const vmm = @import("vmm.zig");
 
 /// Number of IDT entries (256 possible interrupt vectors)
 const IDT_ENTRIES = 256;
@@ -314,21 +317,28 @@ export fn interrupt_handler(frame: *InterruptFrame) void {
 
 fn handleException(frame: *InterruptFrame) void {
     const vector = frame.vector;
-    const name = if (vector < exception_names.len) exception_names[vector] else "Unknown";
 
-    // Display exception info
-    framebuffer.puts("KERNEL PANIC!", 10, 200, 0x00ff0000);
-    framebuffer.puts(name, 10, 220, 0x00ff0000);
-
-    // For page faults, CR2 contains the faulting address
+    // For page faults, try VMM handler first
     if (vector == Exception.PAGE_FAULT) {
         const cr2 = asm volatile ("mov %%cr2, %[result]"
             : [result] "=r" (-> u64),
         );
-        _ = cr2; // TODO: Display CR2 value
+
+        // Try VMM page fault handler
+        if (vmm.isInitialized() and vmm.handlePageFault(cr2, frame.error_code)) {
+            return; // Handled successfully
+        }
+
+        // VMM couldn't handle it - panic
+        framebuffer.puts("PAGE FAULT!", 10, 200, 0x00ff0000);
+        framebuffer.puts("Address: (see CR2)", 10, 220, 0x00ff0000);
+    } else {
+        const name = if (vector < exception_names.len) exception_names[vector] else "Unknown";
+        framebuffer.puts("KERNEL PANIC!", 10, 200, 0x00ff0000);
+        framebuffer.puts(name, 10, 220, 0x00ff0000);
     }
 
-    // Halt on exception
+    // Halt on unhandled exception
     asm volatile ("cli");
     while (true) {
         asm volatile ("hlt");
@@ -338,22 +348,26 @@ fn handleException(frame: *InterruptFrame) void {
 fn handleIrq(frame: *InterruptFrame) void {
     const irq: u8 = @truncate(frame.vector - 32);
 
-    // TODO: Call registered IRQ handlers based on irq number
-    // For now, just acknowledge the interrupt
+    // Handle specific IRQs
+    switch (irq) {
+        0 => {
+            // Timer interrupt - call scheduler tick
+            if (scheduler.isRunning()) {
+                scheduler.tick();
+            }
+        },
+        else => {
+            // Other IRQs - not handled yet
+        },
+    }
 
     // Send End-Of-Interrupt to PIC
     pic.sendEoi(irq);
 }
 
 fn handleSyscall(frame: *InterruptFrame) void {
-    // Syscall number in rax
-    // Arguments in rdi, rsi, rdx, r10, r8, r9
-    const syscall_num = frame.rax;
-    _ = syscall_num;
-
-    // TODO: Dispatch to syscall handlers
-    // For now, return -1 (not implemented)
-    frame.rax = @bitCast(@as(i64, -1));
+    // Dispatch to syscall handler
+    syscall.handle(frame);
 }
 
 /// Enable interrupts
