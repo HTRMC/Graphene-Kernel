@@ -199,7 +199,7 @@ pub fn cast(comptime T: type, obj: *Object) ?*T {
         return null;
     }
 
-    return @fieldParentPtr("base", obj);
+    return @alignCast(@fieldParentPtr("base", obj));
 }
 
 /// Get object type name for debugging
