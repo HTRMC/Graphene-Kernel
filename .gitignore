@@ -4,3 +4,5 @@
 /limine
 /ovmf
 DESIGN.md
+/user/.zig-cache
+/.claude
