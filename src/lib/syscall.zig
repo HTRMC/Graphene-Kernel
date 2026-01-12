@@ -13,6 +13,7 @@ const vmm = @import("vmm.zig");
 const pmm = @import("pmm.zig");
 const usermode = @import("usermode.zig");
 const ipc = @import("ipc.zig");
+const pic = @import("pic.zig");
 
 /// Syscall numbers (from DESIGN.md)
 pub const SyscallNumber = enum(u64) {
@@ -35,6 +36,8 @@ pub const SyscallNumber = enum(u64) {
     // Extensions
     cap_info = 16, // Get capability info
     process_info = 17, // Get process info
+    io_port_read = 18, // Read from I/O port
+    io_port_write = 19, // Write to I/O port
     _,
 };
 
@@ -155,6 +158,8 @@ fn dispatch(num: u64, args: [6]u64) i64 {
         .debug_print => sysDebugPrint(args),
         .cap_info => sysCapInfo(args),
         .process_info => sysProcessInfo(args),
+        .io_port_read => sysIoPortRead(args),
+        .io_port_write => sysIoPortWrite(args),
         _ => @intFromEnum(SyscallError.invalid_syscall),
     };
 }
@@ -634,14 +639,97 @@ fn sysProcessExit(args: [6]u64) i64 {
 
 fn sysIrqWait(args: [6]u64) i64 {
     // irq_wait(cap_slot)
-    _ = args;
-    return @intFromEnum(SyscallError.not_implemented);
+    // Blocks until an IRQ fires. Returns 0 on success, negative on error.
+    const cap_slot: capability.CapSlot = @truncate(args[0]);
+
+    // Get current process
+    const proc = process.getCurrentProcess() orelse {
+        return @intFromEnum(SyscallError.invalid_capability);
+    };
+
+    const cap_table = proc.cap_table orelse {
+        return @intFromEnum(SyscallError.invalid_capability);
+    };
+
+    // Look up IRQ capability with HANDLE rights
+    const obj = capability.lookup(cap_table, cap_slot, .irq, capability.Rights.HANDLE) catch |err| {
+        return switch (err) {
+            capability.CapError.InvalidSlot => @intFromEnum(SyscallError.invalid_capability),
+            capability.CapError.InvalidCapability => @intFromEnum(SyscallError.invalid_capability),
+            capability.CapError.TypeMismatch => @intFromEnum(SyscallError.type_mismatch),
+            capability.CapError.InsufficientRights => @intFromEnum(SyscallError.permission_denied),
+            else => @intFromEnum(SyscallError.invalid_argument),
+        };
+    };
+
+    // Get IRQ object from base object
+    const irq_obj = object.cast(object.IrqObject, obj) orelse {
+        return @intFromEnum(SyscallError.type_mismatch);
+    };
+
+    // Check if there's already a pending IRQ
+    if (irq_obj.pending_count > 0) {
+        irq_obj.pending_count -= 1;
+        return @intFromEnum(SyscallError.success);
+    }
+
+    // No pending IRQ - block the current thread
+    const current_thread = thread.getCurrentThreadUnsafe() orelse {
+        return @intFromEnum(SyscallError.invalid_argument);
+    };
+
+    // Add to wait queue and block
+    irq_obj.wait_queue.enqueue(current_thread);
+    current_thread.state = .blocked;
+
+    // Yield to scheduler - will resume when IRQ fires
+    if (scheduler.isRunning()) {
+        scheduler.yield();
+    }
+
+    // When we wake up, the IRQ has fired
+    // Decrement pending count (was incremented by IRQ handler before waking us)
+    if (irq_obj.pending_count > 0) {
+        irq_obj.pending_count -= 1;
+    }
+
+    return @intFromEnum(SyscallError.success);
 }
 
 fn sysIrqAck(args: [6]u64) i64 {
     // irq_ack(cap_slot)
-    _ = args;
-    return @intFromEnum(SyscallError.not_implemented);
+    // Acknowledges an IRQ and re-enables it in the PIC.
+    const cap_slot: capability.CapSlot = @truncate(args[0]);
+
+    // Get current process
+    const proc = process.getCurrentProcess() orelse {
+        return @intFromEnum(SyscallError.invalid_capability);
+    };
+
+    const cap_table = proc.cap_table orelse {
+        return @intFromEnum(SyscallError.invalid_capability);
+    };
+
+    // Look up IRQ capability with HANDLE rights
+    const obj = capability.lookup(cap_table, cap_slot, .irq, capability.Rights.HANDLE) catch |err| {
+        return switch (err) {
+            capability.CapError.InvalidSlot => @intFromEnum(SyscallError.invalid_capability),
+            capability.CapError.InvalidCapability => @intFromEnum(SyscallError.invalid_capability),
+            capability.CapError.TypeMismatch => @intFromEnum(SyscallError.type_mismatch),
+            capability.CapError.InsufficientRights => @intFromEnum(SyscallError.permission_denied),
+            else => @intFromEnum(SyscallError.invalid_argument),
+        };
+    };
+
+    // Get IRQ object from base object
+    const irq_obj = object.cast(object.IrqObject, obj) orelse {
+        return @intFromEnum(SyscallError.type_mismatch);
+    };
+
+    // Unmask the IRQ to allow it to fire again
+    pic.unmaskIrq(irq_obj.irq_num);
+
+    return @intFromEnum(SyscallError.success);
 }
 
 /// Debug print Y position (advances with each print)
@@ -704,6 +792,124 @@ fn sysProcessInfo(args: [6]u64) i64 {
     return @intFromEnum(SyscallError.not_implemented);
 }
 
+fn sysIoPortRead(args: [6]u64) i64 {
+    // io_port_read(cap_slot, port, width)
+    // Reads from an I/O port. Returns the value read or negative error.
+    const cap_slot: capability.CapSlot = @truncate(args[0]);
+    const port: u16 = @truncate(args[1]);
+    const width: u8 = @truncate(args[2]); // 1, 2, or 4 bytes
+
+    // Get current process
+    const proc = process.getCurrentProcess() orelse {
+        return @intFromEnum(SyscallError.invalid_capability);
+    };
+
+    const cap_table = proc.cap_table orelse {
+        return @intFromEnum(SyscallError.invalid_capability);
+    };
+
+    // Look up I/O port capability with read rights
+    const obj = capability.lookup(cap_table, cap_slot, .ioport, capability.Rights.RO) catch |err| {
+        return switch (err) {
+            capability.CapError.InvalidSlot => @intFromEnum(SyscallError.invalid_capability),
+            capability.CapError.InvalidCapability => @intFromEnum(SyscallError.invalid_capability),
+            capability.CapError.TypeMismatch => @intFromEnum(SyscallError.type_mismatch),
+            capability.CapError.InsufficientRights => @intFromEnum(SyscallError.permission_denied),
+            else => @intFromEnum(SyscallError.invalid_argument),
+        };
+    };
+
+    // Get I/O port object from base object
+    const ioport_obj = object.cast(object.IoPortObject, obj) orelse {
+        return @intFromEnum(SyscallError.type_mismatch);
+    };
+
+    // Validate port is within capability's range
+    if (port < ioport_obj.port_start or port >= ioport_obj.port_start + ioport_obj.port_count) {
+        return @intFromEnum(SyscallError.permission_denied);
+    }
+
+    // Perform the I/O read based on width
+    const value: u32 = switch (width) {
+        1 => asm volatile ("inb %%dx, %%al"
+            : [result] "={al}" (-> u8),
+            : [port] "{dx}" (port),
+        ),
+        2 => asm volatile ("inw %%dx, %%ax"
+            : [result] "={ax}" (-> u16),
+            : [port] "{dx}" (port),
+        ),
+        4 => asm volatile ("inl %%dx, %%eax"
+            : [result] "={eax}" (-> u32),
+            : [port] "{dx}" (port),
+        ),
+        else => return @intFromEnum(SyscallError.invalid_argument),
+    };
+
+    return @intCast(value);
+}
+
+fn sysIoPortWrite(args: [6]u64) i64 {
+    // io_port_write(cap_slot, port, value, width)
+    // Writes to an I/O port. Returns 0 on success or negative error.
+    const cap_slot: capability.CapSlot = @truncate(args[0]);
+    const port: u16 = @truncate(args[1]);
+    const value: u32 = @truncate(args[2]);
+    const width: u8 = @truncate(args[3]); // 1, 2, or 4 bytes
+
+    // Get current process
+    const proc = process.getCurrentProcess() orelse {
+        return @intFromEnum(SyscallError.invalid_capability);
+    };
+
+    const cap_table = proc.cap_table orelse {
+        return @intFromEnum(SyscallError.invalid_capability);
+    };
+
+    // Look up I/O port capability with write rights
+    const obj = capability.lookup(cap_table, cap_slot, .ioport, .{ .write = true }) catch |err| {
+        return switch (err) {
+            capability.CapError.InvalidSlot => @intFromEnum(SyscallError.invalid_capability),
+            capability.CapError.InvalidCapability => @intFromEnum(SyscallError.invalid_capability),
+            capability.CapError.TypeMismatch => @intFromEnum(SyscallError.type_mismatch),
+            capability.CapError.InsufficientRights => @intFromEnum(SyscallError.permission_denied),
+            else => @intFromEnum(SyscallError.invalid_argument),
+        };
+    };
+
+    // Get I/O port object from base object
+    const ioport_obj = object.cast(object.IoPortObject, obj) orelse {
+        return @intFromEnum(SyscallError.type_mismatch);
+    };
+
+    // Validate port is within capability's range
+    if (port < ioport_obj.port_start or port >= ioport_obj.port_start + ioport_obj.port_count) {
+        return @intFromEnum(SyscallError.permission_denied);
+    }
+
+    // Perform the I/O write based on width
+    switch (width) {
+        1 => asm volatile ("outb %%al, %%dx"
+            :
+            : [value] "{al}" (@as(u8, @truncate(value))),
+              [port] "{dx}" (port),
+        ),
+        2 => asm volatile ("outw %%ax, %%dx"
+            :
+            : [value] "{ax}" (@as(u16, @truncate(value))),
+              [port] "{dx}" (port),
+        ),
+        4 => asm volatile ("outl %%eax, %%dx"
+            :
+            : [value] "{eax}" (value),
+              [port] "{dx}" (port),
+        ),
+        else => return @intFromEnum(SyscallError.invalid_argument),
+    }
+
+    return @intFromEnum(SyscallError.success);
+}
+
 /// Check if syscall is initialized
 pub fn isInitialized() bool {
     return syscall_initialized;
@@ -731,6 +937,8 @@ pub fn getName(num: u64) []const u8 {
         .debug_print => "debug_print",
         .cap_info => "cap_info",
         .process_info => "process_info",
+        .io_port_read => "io_port_read",
+        .io_port_write => "io_port_write",
         _ => "unknown",
     };
 }
