@@ -4,7 +4,7 @@
 const syscall = @import("syscall");
 
 /// Main entry point for init
-export fn main() i32 {
+pub fn main() i32 {
     // Print startup message
     syscall.print("Graphene init started\n");
     syscall.print("Running in user mode!\n");
