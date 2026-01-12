@@ -34,9 +34,10 @@ Clone the repository and run:
 # Windows
 .\run.bat
 
-# This will:
-# 1. Download Zig 0.16.0-dev.1859+212968c57 (first run only)
-# 2. Compile the kernel
+# First run automatically downloads:
+#   - Zig 0.16.0-dev.1859+212968c57 compiler
+#   - OVMF firmware (for UEFI boot)
+# Then compiles the kernel
 ```
 
 ## Running
