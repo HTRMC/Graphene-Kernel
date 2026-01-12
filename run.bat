@@ -53,6 +53,28 @@ if exist "%ZIG_FOLDER%\zig.exe" (
     echo Zig compiler installed successfully!
 )
 
+:: Check if OVMF exists (needed for UEFI boot in QEMU)
+if exist "ovmf\OVMF.fd" (
+    echo OVMF firmware found!
+) else (
+    echo OVMF firmware not found. Downloading...
+
+    :: Create ovmf directory
+    if not exist ovmf mkdir ovmf
+
+    :: Download OVMF from edk2 nightly builds
+    set OVMF_URL=https://retrage.github.io/edk2-nightly/bin/RELEASEX64_OVMF.fd
+    echo Downloading OVMF from !OVMF_URL!...
+    curl -L -o "ovmf\OVMF.fd" "!OVMF_URL!"
+
+    if errorlevel 1 (
+        echo Failed to download OVMF firmware!
+        exit /b 1
+    )
+
+    echo OVMF firmware installed successfully!
+)
+
 :: Run the kernel build
 echo.
 echo Building Graphene Kernel...
