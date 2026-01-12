@@ -35,6 +35,12 @@ if exist "zig-out\bin\init" (
     echo Copied init process to ISO
 )
 
+:: Copy shell process (if it exists)
+if exist "zig-out\bin\shell" (
+    copy "zig-out\bin\shell" "%ISO_ROOT%\boot\shell"
+    echo Copied shell process to ISO
+)
+
 :: Copy Limine config
 copy "limine.conf" "%ISO_ROOT%\boot\limine\limine.conf"
 
