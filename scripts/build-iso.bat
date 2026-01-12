@@ -29,6 +29,12 @@ mkdir "%ISO_ROOT%\EFI\BOOT"
 :: Copy kernel
 copy "zig-out\bin\graphene" "%ISO_ROOT%\boot\graphene"
 
+:: Copy init process (if it exists)
+if exist "zig-out\bin\init" (
+    copy "zig-out\bin\init" "%ISO_ROOT%\boot\init"
+    echo Copied init process to ISO
+)
+
 :: Copy Limine config
 copy "limine.conf" "%ISO_ROOT%\boot\limine\limine.conf"
 
