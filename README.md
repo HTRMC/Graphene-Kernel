@@ -1,6 +1,6 @@
 # Graphene Kernel
 
-A minimal x86_64 monolithic kernel written in Zig.
+A hybrid microkernel for x86_64 written in Zig, featuring capability-based security.
 
 ## Prerequisites
 
@@ -65,7 +65,10 @@ graphene-kernel/
 │   └── lib/
 │       ├── limine.zig      # Limine bootloader bindings
 │       ├── framebuffer.zig # Framebuffer driver
-│       └── font.zig        # 8x8 bitmap font
+│       ├── font.zig        # 8x8 bitmap font
+│       ├── gdt.zig         # Global Descriptor Table + TSS
+│       ├── idt.zig         # Interrupt Descriptor Table
+│       └── pic.zig         # 8259 PIC driver
 └── scripts/
     └── build-iso.bat   # ISO creation script
 ```
@@ -74,7 +77,8 @@ graphene-kernel/
 
 - **Target**: x86_64 freestanding
 - **Bootloader**: Limine (UEFI + BIOS)
-- **Kernel type**: Monolithic
+- **Kernel type**: Hybrid microkernel
+- **Security model**: Capability-based (no root/UID)
 
 ## Dependencies (auto-downloaded)
 
@@ -83,3 +87,17 @@ graphene-kernel/
 | Zig        | Compiler               | `compiler/zig/` |
 | Limine     | Bootloader             | `limine/`       |
 | OVMF       | UEFI firmware for QEMU | `ovmf/`         |
+
+## Known Issues
+
+### Windows: Build fails on first attempt
+
+On Windows, the first build may fail with an LLD linker error:
+
+```
+error: ld.lld ... failure
+```
+
+**Cause**: Windows file locking - the linker can't write to output files that are still locked from a previous build.
+
+**Solution**: Run `.\run.bat` again. The build usually succeeds on retry. (If not please reach out😊)
