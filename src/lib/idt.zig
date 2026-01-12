@@ -8,6 +8,7 @@ const pic = @import("pic.zig");
 const scheduler = @import("scheduler.zig");
 const syscall = @import("syscall.zig");
 const vmm = @import("vmm.zig");
+const object = @import("object.zig");
 
 /// Number of IDT entries (256 possible interrupt vectors)
 const IDT_ENTRIES = 256;
@@ -357,7 +358,16 @@ fn handleIrq(frame: *InterruptFrame) void {
             }
         },
         else => {
-            // Other IRQs - not handled yet
+            // Other hardware IRQs - wake user-space driver if registered
+            if (object.getIrqObject(irq)) |irq_obj| {
+                // Increment pending count (IRQ fired)
+                irq_obj.pending_count += 1;
+
+                // Wake one waiting driver thread if any
+                if (irq_obj.wait_queue.dequeue()) |waiting_thread| {
+                    scheduler.wake(waiting_thread);
+                }
+            }
         },
     }
 
