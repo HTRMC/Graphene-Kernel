@@ -62,13 +62,23 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // Init process module
-    const init_module = b.createModule(.{
+    // Init process module (start.zig is root, calls main from init)
+    const init_main_module = b.createModule(.{
         .root_source_file = b.path("user/init/main.zig"),
         .target = user_target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "syscall", .module = syscall_module },
+        },
+    });
+
+    const init_module = b.createModule(.{
+        .root_source_file = b.path("user/lib/start.zig"),
+        .target = user_target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "syscall", .module = syscall_module },
+            .{ .name = "main", .module = init_main_module },
         },
     });
 
