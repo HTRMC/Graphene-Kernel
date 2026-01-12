@@ -6,6 +6,11 @@ const idt = @import("idt.zig");
 const framebuffer = @import("framebuffer.zig");
 const capability = @import("capability.zig");
 const object = @import("object.zig");
+const thread = @import("thread.zig");
+const process = @import("process.zig");
+const scheduler = @import("scheduler.zig");
+const vmm = @import("vmm.zig");
+const usermode = @import("usermode.zig");
 
 /// Syscall numbers (from DESIGN.md)
 pub const SyscallNumber = enum(u64) {
@@ -236,16 +241,37 @@ fn sysThreadCreate(args: [6]u64) i64 {
 
 fn sysThreadExit(args: [6]u64) i64 {
     // thread_exit(code)
-    _ = args;
-    // Requires scheduler implementation
-    return @intFromEnum(SyscallError.not_implemented);
+    const code: i32 = @truncate(@as(i64, @bitCast(args[0])));
+
+    // Mark current thread as zombie
+    if (thread.getCurrentThreadUnsafe()) |t| {
+        t.state = .zombie;
+    }
+
+    // If scheduler is running, yield to let it clean up
+    if (scheduler.isRunning()) {
+        scheduler.yield();
+    }
+
+    // Should not return, but if it does, halt
+    asm volatile ("cli");
+    while (true) {
+        asm volatile ("hlt");
+    }
+
+    _ = code;
+    return 0; // Never reached
 }
 
 fn sysThreadYield(args: [6]u64) i64 {
     // thread_yield()
     _ = args;
-    // Requires scheduler implementation
-    return @intFromEnum(SyscallError.not_implemented);
+
+    if (scheduler.isRunning()) {
+        scheduler.yield();
+    }
+
+    return 0;
 }
 
 fn sysProcessCreate(args: [6]u64) i64 {
@@ -256,8 +282,33 @@ fn sysProcessCreate(args: [6]u64) i64 {
 
 fn sysProcessExit(args: [6]u64) i64 {
     // process_exit(code)
-    _ = args;
-    return @intFromEnum(SyscallError.not_implemented);
+    const code: i32 = @truncate(@as(i64, @bitCast(args[0])));
+
+    // Get current process and exit it
+    if (process.getCurrentProcess()) |proc| {
+        proc.exit_code = code;
+        proc.state = .zombie;
+
+        // Mark all threads as zombie
+        for (proc.threads) |maybe_thread| {
+            if (maybe_thread) |t| {
+                t.state = .zombie;
+            }
+        }
+    }
+
+    // If scheduler is running, yield
+    if (scheduler.isRunning()) {
+        scheduler.yield();
+    }
+
+    // Should not return
+    asm volatile ("cli");
+    while (true) {
+        asm volatile ("hlt");
+    }
+
+    return 0; // Never reached
 }
 
 fn sysIrqWait(args: [6]u64) i64 {
@@ -272,6 +323,9 @@ fn sysIrqAck(args: [6]u64) i64 {
     return @intFromEnum(SyscallError.not_implemented);
 }
 
+/// Debug print Y position (advances with each print)
+var debug_y: u32 = 300;
+
 fn sysDebugPrint(args: [6]u64) i64 {
     // debug_print(str_ptr, str_len)
     const str_ptr = args[0];
@@ -281,27 +335,36 @@ fn sysDebugPrint(args: [6]u64) i64 {
         return @intFromEnum(SyscallError.invalid_argument);
     }
 
-    // Safety: In a real kernel, we'd validate the pointer is in user space
-    // For Phase 1, just print
+    // Validate user buffer
+    if (!usermode.isUserAddress(str_ptr) or !usermode.isUserAddress(str_ptr + str_len - 1)) {
+        return @intFromEnum(SyscallError.invalid_argument);
+    }
+
+    // Get string from user space
     const str: [*]const u8 = @ptrFromInt(str_ptr);
     const slice = str[0..@min(str_len, 256)];
 
-    // Simple kernel debug print (static position for now)
-    // In production, would use serial port or proper console
-    var y: u32 = 260;
+    // Print to framebuffer
+    var y: u32 = debug_y;
     var x: u32 = 10;
     for (slice) |c| {
         if (c == '\n') {
-            y += 10;
+            y += 16;
             x = 10;
-        } else {
-            framebuffer.putChar(c, x, y, 0x00ffff00);
+        } else if (c >= 32 and c < 127) {
+            framebuffer.putChar(c, x, y, 0x0000ff00); // Green for user output
             x += 8;
-            if (x > 700) {
+            if (x > 780) {
                 x = 10;
-                y += 10;
+                y += 16;
             }
         }
+    }
+
+    // Update position for next print
+    debug_y = y + 16;
+    if (debug_y > 580) {
+        debug_y = 300; // Wrap around
     }
 
     return @intCast(str_len);
