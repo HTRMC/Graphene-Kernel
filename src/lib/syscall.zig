@@ -10,7 +10,9 @@ const thread = @import("thread.zig");
 const process = @import("process.zig");
 const scheduler = @import("scheduler.zig");
 const vmm = @import("vmm.zig");
+const pmm = @import("pmm.zig");
 const usermode = @import("usermode.zig");
+const ipc = @import("ipc.zig");
 
 /// Syscall numbers (from DESIGN.md)
 pub const SyscallNumber = enum(u64) {
@@ -163,23 +165,203 @@ fn dispatch(num: u64, args: [6]u64) i64 {
 
 fn sysCapSend(args: [6]u64) i64 {
     // cap_send(cap_slot, msg_ptr, msg_len)
-    _ = args;
-    // Requires IPC implementation
-    return @intFromEnum(SyscallError.not_implemented);
+    const cap_slot: capability.CapSlot = @truncate(args[0]);
+    const msg_ptr = args[1];
+    const msg_len = args[2];
+
+    // Get current process
+    const proc = process.getCurrentProcess() orelse {
+        return @intFromEnum(SyscallError.invalid_capability);
+    };
+
+    const cap_table = proc.cap_table orelse {
+        return @intFromEnum(SyscallError.invalid_capability);
+    };
+
+    // Validate user buffer
+    if (msg_len > 0) {
+        if (!usermode.isUserAddress(msg_ptr) or !usermode.isUserAddress(msg_ptr + msg_len - 1)) {
+            return @intFromEnum(SyscallError.invalid_argument);
+        }
+    }
+
+    if (msg_len > ipc.MAX_INLINE_DATA) {
+        return @intFromEnum(SyscallError.invalid_argument);
+    }
+
+    // Look up endpoint capability with send rights
+    const obj = capability.lookup(cap_table, cap_slot, .ipc_endpoint, capability.Rights.SEND) catch |err| {
+        return switch (err) {
+            capability.CapError.InvalidSlot => @intFromEnum(SyscallError.invalid_capability),
+            capability.CapError.InvalidCapability => @intFromEnum(SyscallError.invalid_capability),
+            capability.CapError.TypeMismatch => @intFromEnum(SyscallError.type_mismatch),
+            capability.CapError.InsufficientRights => @intFromEnum(SyscallError.permission_denied),
+            else => @intFromEnum(SyscallError.invalid_argument),
+        };
+    };
+
+    // Get endpoint from object
+    const endpoint: *ipc.Endpoint = @alignCast(@fieldParentPtr("base", obj));
+
+    // Build message
+    var msg = ipc.Message{};
+    if (msg_len > 0) {
+        const user_data: [*]const u8 = @ptrFromInt(msg_ptr);
+        msg.setData(user_data[0..msg_len]);
+    }
+
+    // Send the message
+    ipc.send(endpoint, &msg, cap_table) catch |err| {
+        return switch (err) {
+            ipc.IpcError.EndpointClosed => @intFromEnum(SyscallError.not_found),
+            ipc.IpcError.QueueFull => @intFromEnum(SyscallError.would_block),
+            ipc.IpcError.NotConnected => @intFromEnum(SyscallError.not_found),
+            else => @intFromEnum(SyscallError.invalid_argument),
+        };
+    };
+
+    return @intFromEnum(SyscallError.success);
 }
 
 fn sysCapRecv(args: [6]u64) i64 {
     // cap_recv(cap_slot, buf_ptr, buf_len)
-    _ = args;
-    // Requires IPC implementation
-    return @intFromEnum(SyscallError.not_implemented);
+    const cap_slot: capability.CapSlot = @truncate(args[0]);
+    const buf_ptr = args[1];
+    const buf_len = args[2];
+
+    // Get current process
+    const proc = process.getCurrentProcess() orelse {
+        return @intFromEnum(SyscallError.invalid_capability);
+    };
+
+    const cap_table = proc.cap_table orelse {
+        return @intFromEnum(SyscallError.invalid_capability);
+    };
+
+    // Validate user buffer
+    if (buf_len > 0) {
+        if (!usermode.isUserAddress(buf_ptr) or !usermode.isUserAddress(buf_ptr + buf_len - 1)) {
+            return @intFromEnum(SyscallError.invalid_argument);
+        }
+    }
+
+    // Look up endpoint capability with handle rights (for receiving)
+    const obj = capability.lookup(cap_table, cap_slot, .ipc_endpoint, capability.Rights.HANDLE) catch |err| {
+        return switch (err) {
+            capability.CapError.InvalidSlot => @intFromEnum(SyscallError.invalid_capability),
+            capability.CapError.InvalidCapability => @intFromEnum(SyscallError.invalid_capability),
+            capability.CapError.TypeMismatch => @intFromEnum(SyscallError.type_mismatch),
+            capability.CapError.InsufficientRights => @intFromEnum(SyscallError.permission_denied),
+            else => @intFromEnum(SyscallError.invalid_argument),
+        };
+    };
+
+    // Get endpoint from object
+    const endpoint: *ipc.Endpoint = @alignCast(@fieldParentPtr("base", obj));
+
+    // Receive message
+    var msg = ipc.Message{};
+    ipc.recv(endpoint, &msg, cap_table) catch |err| {
+        return switch (err) {
+            ipc.IpcError.EndpointClosed => @intFromEnum(SyscallError.not_found),
+            ipc.IpcError.NotConnected => @intFromEnum(SyscallError.not_found),
+            else => @intFromEnum(SyscallError.invalid_argument),
+        };
+    };
+
+    // Copy message data to user buffer
+    const data = msg.getData();
+    const copy_len = @min(data.len, buf_len);
+    if (copy_len > 0) {
+        const user_buf: [*]u8 = @ptrFromInt(buf_ptr);
+        for (0..copy_len) |i| {
+            user_buf[i] = data[i];
+        }
+    }
+
+    // Return length of received message
+    return @intCast(data.len);
 }
 
 fn sysCapCall(args: [6]u64) i64 {
     // cap_call(cap_slot, msg_ptr, msg_len, reply_ptr, reply_len)
-    _ = args;
-    // Requires IPC implementation
-    return @intFromEnum(SyscallError.not_implemented);
+    const cap_slot: capability.CapSlot = @truncate(args[0]);
+    const msg_ptr = args[1];
+    const msg_len = args[2];
+    const reply_ptr = args[3];
+    const reply_len = args[4];
+
+    // Get current process
+    const proc = process.getCurrentProcess() orelse {
+        return @intFromEnum(SyscallError.invalid_capability);
+    };
+
+    const cap_table = proc.cap_table orelse {
+        return @intFromEnum(SyscallError.invalid_capability);
+    };
+
+    // Validate user buffers
+    if (msg_len > 0) {
+        if (!usermode.isUserAddress(msg_ptr) or !usermode.isUserAddress(msg_ptr + msg_len - 1)) {
+            return @intFromEnum(SyscallError.invalid_argument);
+        }
+    }
+
+    if (reply_len > 0) {
+        if (!usermode.isUserAddress(reply_ptr) or !usermode.isUserAddress(reply_ptr + reply_len - 1)) {
+            return @intFromEnum(SyscallError.invalid_argument);
+        }
+    }
+
+    if (msg_len > ipc.MAX_INLINE_DATA) {
+        return @intFromEnum(SyscallError.invalid_argument);
+    }
+
+    // Look up endpoint capability with send rights
+    const obj = capability.lookup(cap_table, cap_slot, .ipc_endpoint, capability.Rights.SEND) catch |err| {
+        return switch (err) {
+            capability.CapError.InvalidSlot => @intFromEnum(SyscallError.invalid_capability),
+            capability.CapError.InvalidCapability => @intFromEnum(SyscallError.invalid_capability),
+            capability.CapError.TypeMismatch => @intFromEnum(SyscallError.type_mismatch),
+            capability.CapError.InsufficientRights => @intFromEnum(SyscallError.permission_denied),
+            else => @intFromEnum(SyscallError.invalid_argument),
+        };
+    };
+
+    // Get endpoint from object
+    const endpoint: *ipc.Endpoint = @alignCast(@fieldParentPtr("base", obj));
+
+    // Build message
+    var msg = ipc.Message{};
+    if (msg_len > 0) {
+        const user_data: [*]const u8 = @ptrFromInt(msg_ptr);
+        msg.setData(user_data[0..msg_len]);
+    }
+
+    // Make the call (send + wait for reply)
+    var reply_msg = ipc.Message{};
+    ipc.call(endpoint, &msg, &reply_msg, cap_table) catch |err| {
+        return switch (err) {
+            ipc.IpcError.EndpointClosed => @intFromEnum(SyscallError.not_found),
+            ipc.IpcError.QueueFull => @intFromEnum(SyscallError.would_block),
+            ipc.IpcError.NotConnected => @intFromEnum(SyscallError.not_found),
+            ipc.IpcError.Timeout => @intFromEnum(SyscallError.would_block),
+            else => @intFromEnum(SyscallError.invalid_argument),
+        };
+    };
+
+    // Copy reply to user buffer
+    const reply_data = reply_msg.getData();
+    const copy_len = @min(reply_data.len, reply_len);
+    if (copy_len > 0) {
+        const user_buf: [*]u8 = @ptrFromInt(reply_ptr);
+        for (0..copy_len) |i| {
+            user_buf[i] = reply_data[i];
+        }
+    }
+
+    // Return length of reply
+    return @intCast(reply_data.len);
 }
 
 fn sysCapCopy(args: [6]u64) i64 {
@@ -188,48 +370,187 @@ fn sysCapCopy(args: [6]u64) i64 {
     const dst_slot: capability.CapSlot = @truncate(args[1]);
     const rights_mask: capability.Rights = @bitCast(@as(u8, @truncate(args[2])));
 
-    // Get current process's capability table
-    // For Phase 1, we don't have processes yet, return not_implemented
-    _ = src_slot;
-    _ = dst_slot;
-    _ = rights_mask;
-    return @intFromEnum(SyscallError.not_implemented);
+    // Get current process
+    const proc = process.getCurrentProcess() orelse {
+        return @intFromEnum(SyscallError.invalid_capability);
+    };
+
+    const cap_table = proc.cap_table orelse {
+        return @intFromEnum(SyscallError.invalid_capability);
+    };
+
+    // Copy capability with reduced rights
+    capability.copy(cap_table, src_slot, dst_slot, rights_mask) catch |err| {
+        return switch (err) {
+            capability.CapError.InvalidSlot => @intFromEnum(SyscallError.invalid_capability),
+            capability.CapError.InvalidCapability => @intFromEnum(SyscallError.invalid_capability),
+            capability.CapError.SlotInUse => @intFromEnum(SyscallError.invalid_argument),
+            else => @intFromEnum(SyscallError.invalid_argument),
+        };
+    };
+
+    return @intFromEnum(SyscallError.success);
 }
 
 fn sysCapDelete(args: [6]u64) i64 {
     // cap_delete(slot)
     const slot: capability.CapSlot = @truncate(args[0]);
-    _ = slot;
-    return @intFromEnum(SyscallError.not_implemented);
+
+    // Get current process
+    const proc = process.getCurrentProcess() orelse {
+        return @intFromEnum(SyscallError.invalid_capability);
+    };
+
+    const cap_table = proc.cap_table orelse {
+        return @intFromEnum(SyscallError.invalid_capability);
+    };
+
+    // Delete the capability
+    capability.delete(cap_table, slot);
+
+    return @intFromEnum(SyscallError.success);
 }
 
 fn sysCapRevoke(args: [6]u64) i64 {
     // cap_revoke(slot)
     const slot: capability.CapSlot = @truncate(args[0]);
-    _ = slot;
-    return @intFromEnum(SyscallError.not_implemented);
+
+    // Get current process
+    const proc = process.getCurrentProcess() orelse {
+        return @intFromEnum(SyscallError.invalid_capability);
+    };
+
+    const cap_table = proc.cap_table orelse {
+        return @intFromEnum(SyscallError.invalid_capability);
+    };
+
+    // Revoke the capability (invalidates all derived capabilities)
+    capability.revoke(cap_table, slot);
+
+    return @intFromEnum(SyscallError.success);
 }
+
+/// Memory map flags (from user space)
+const MemMapFlags = packed struct(u64) {
+    read: bool = false,
+    write: bool = false,
+    execute: bool = false,
+    _reserved: u61 = 0,
+};
 
 fn sysMemMap(args: [6]u64) i64 {
     // mem_map(cap_slot, vaddr, size, flags)
     const cap_slot: capability.CapSlot = @truncate(args[0]);
     const vaddr = args[1];
     const size = args[2];
-    const flags = args[3];
-    _ = cap_slot;
-    _ = vaddr;
-    _ = size;
-    _ = flags;
-    return @intFromEnum(SyscallError.not_implemented);
+    const flags: MemMapFlags = @bitCast(args[3]);
+
+    // Get current process
+    const proc = process.getCurrentProcess() orelse {
+        return @intFromEnum(SyscallError.invalid_capability);
+    };
+
+    const cap_table = proc.cap_table orelse {
+        return @intFromEnum(SyscallError.invalid_capability);
+    };
+
+    const address_space = proc.address_space orelse {
+        return @intFromEnum(SyscallError.out_of_memory);
+    };
+
+    // Validate address is in user space
+    if (!usermode.isUserAddress(vaddr) or !usermode.isUserAddress(vaddr + size - 1)) {
+        return @intFromEnum(SyscallError.invalid_argument);
+    }
+
+    // W^X enforcement at syscall level
+    if (flags.write and flags.execute) {
+        return @intFromEnum(SyscallError.permission_denied);
+    }
+
+    // Build required rights based on flags
+    var required_rights = capability.Rights{};
+    if (flags.read) required_rights.read = true;
+    if (flags.write) required_rights.write = true;
+    if (flags.execute) required_rights.execute = true;
+
+    // Look up memory capability and validate rights
+    const obj = capability.lookup(cap_table, cap_slot, .memory, required_rights) catch |err| {
+        return switch (err) {
+            capability.CapError.InvalidSlot => @intFromEnum(SyscallError.invalid_capability),
+            capability.CapError.InvalidCapability => @intFromEnum(SyscallError.invalid_capability),
+            capability.CapError.TypeMismatch => @intFromEnum(SyscallError.type_mismatch),
+            capability.CapError.InsufficientRights => @intFromEnum(SyscallError.permission_denied),
+            else => @intFromEnum(SyscallError.invalid_argument),
+        };
+    };
+
+    // Get the memory object
+    const mem_obj = object.cast(object.MemoryObject, obj) orelse {
+        return @intFromEnum(SyscallError.type_mismatch);
+    };
+
+    // Validate size doesn't exceed memory object bounds
+    if (size > mem_obj.size) {
+        return @intFromEnum(SyscallError.invalid_argument);
+    }
+
+    // Map the region
+    const map_flags = vmm.VmFlags{
+        .read = flags.read,
+        .write = flags.write,
+        .execute = flags.execute,
+        .user = true,
+    };
+
+    vmm.mapRegion(address_space, vaddr, mem_obj.phys_start, size, map_flags) catch |err| {
+        return switch (err) {
+            vmm.VmmError.OutOfMemory => @intFromEnum(SyscallError.out_of_memory),
+            vmm.VmmError.RegionOverlap => @intFromEnum(SyscallError.invalid_argument),
+            vmm.VmmError.WxViolation => @intFromEnum(SyscallError.permission_denied),
+            else => @intFromEnum(SyscallError.invalid_argument),
+        };
+    };
+
+    // Increment map count on memory object
+    mem_obj.map_count += 1;
+
+    return @intFromEnum(SyscallError.success);
 }
 
 fn sysMemUnmap(args: [6]u64) i64 {
     // mem_unmap(vaddr, size)
     const vaddr = args[0];
     const size = args[1];
-    _ = vaddr;
-    _ = size;
-    return @intFromEnum(SyscallError.not_implemented);
+
+    // Get current process
+    const proc = process.getCurrentProcess() orelse {
+        return @intFromEnum(SyscallError.invalid_capability);
+    };
+
+    const address_space = proc.address_space orelse {
+        return @intFromEnum(SyscallError.out_of_memory);
+    };
+
+    // Validate address is in user space
+    if (!usermode.isUserAddress(vaddr) or (size > 0 and !usermode.isUserAddress(vaddr + size - 1))) {
+        return @intFromEnum(SyscallError.invalid_argument);
+    }
+
+    // Find the region
+    const region = address_space.findRegion(vaddr) orelse {
+        return @intFromEnum(SyscallError.not_found);
+    };
+
+    // Only allow unmapping user regions
+    if (!region.flags.user) {
+        return @intFromEnum(SyscallError.permission_denied);
+    }
+
+    // Unmap the region (frees physical pages too)
+    vmm.unmapRegion(address_space, region.start);
+
+    return @intFromEnum(SyscallError.success);
 }
 
 fn sysThreadCreate(args: [6]u64) i64 {
