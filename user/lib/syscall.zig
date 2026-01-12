@@ -89,6 +89,19 @@ inline fn syscall4(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) i64 {
     );
 }
 
+inline fn syscall5(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) i64 {
+    return asm volatile ("int $0x80"
+        : [ret] "={rax}" (-> i64),
+        : [num] "{rax}" (num),
+          [a1] "{rdi}" (a1),
+          [a2] "{rsi}" (a2),
+          [a3] "{rdx}" (a3),
+          [a4] "{r10}" (a4),
+          [a5] "{r8}" (a5),
+        : "memory"
+    );
+}
+
 // ============================================================================
 // High-level syscall wrappers
 // ============================================================================
@@ -167,11 +180,14 @@ pub fn capRecv(cap_slot: u32, buf_ptr: [*]u8, buf_len: usize) i64 {
 
 /// Call and wait for reply (synchronous RPC)
 pub fn capCall(cap_slot: u32, msg: []const u8, reply: []u8) i64 {
-    _ = cap_slot;
-    _ = msg;
-    _ = reply;
-    // Full implementation would use syscall with 5 args
-    return @intFromEnum(SyscallError.not_implemented);
+    return syscall5(
+        @intFromEnum(SyscallNumber.cap_call),
+        cap_slot,
+        @intFromPtr(msg.ptr),
+        msg.len,
+        @intFromPtr(reply.ptr),
+        reply.len,
+    );
 }
 
 /// Copy capability with reduced rights
