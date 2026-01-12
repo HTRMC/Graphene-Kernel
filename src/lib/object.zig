@@ -1,6 +1,8 @@
 // Graphene Kernel - Kernel Objects
 // Base types for capability-based security
 
+const thread = @import("thread.zig");
+
 /// Kernel object types (matches DESIGN.md)
 pub const ObjectType = enum(u8) {
     none = 0,
@@ -123,12 +125,20 @@ pub const IrqObject = struct {
     /// IRQ flags
     irq_flags: IrqFlags,
 
+    /// Wait queue for threads waiting on this IRQ
+    wait_queue: thread.WaitQueue = .{},
+
+    /// Pending IRQ count (IRQs that fired while no thread was waiting)
+    pending_count: u32 = 0,
+
     pub fn init(irq_num: u8) IrqObject {
         return .{
             .base = Object.init(.irq),
             .irq_num = irq_num,
             .handler_registered = false,
             .irq_flags = .{},
+            .wait_queue = .{},
+            .pending_count = 0,
         };
     }
 };
@@ -215,4 +225,78 @@ pub fn typeName(obj_type: ObjectType) []const u8 {
         .ioport => "ioport",
         .device_mmio => "device_mmio",
     };
+}
+
+// ============================================================================
+// Object Pools for Phase 3 Drivers
+// ============================================================================
+
+/// IRQ object pool (one per IRQ line, 16 max for legacy PIC)
+const MAX_IRQ_OBJECTS: usize = 16;
+var irq_object_pool: [MAX_IRQ_OBJECTS]IrqObject = undefined;
+var irq_object_used: [MAX_IRQ_OBJECTS]bool = [_]bool{false} ** MAX_IRQ_OBJECTS;
+
+/// Create an IRQ object for a specific IRQ number
+/// Returns null if IRQ already has an owner or pool is full
+pub fn createIrqObject(irq_num: u8) ?*IrqObject {
+    // Check if IRQ already has an object (only one owner per IRQ)
+    for (&irq_object_pool, irq_object_used) |*obj, used| {
+        if (used and obj.irq_num == irq_num) {
+            return null; // Already owned
+        }
+    }
+
+    // Allocate new IRQ object
+    for (&irq_object_used, 0..) |*used, i| {
+        if (!used.*) {
+            used.* = true;
+            irq_object_pool[i] = IrqObject.init(irq_num);
+            return &irq_object_pool[i];
+        }
+    }
+    return null; // Pool full
+}
+
+/// Find IRQ object by IRQ number (for interrupt handler)
+pub fn getIrqObject(irq_num: u8) ?*IrqObject {
+    for (&irq_object_pool, irq_object_used) |*obj, used| {
+        if (used and obj.irq_num == irq_num) {
+            return obj;
+        }
+    }
+    return null;
+}
+
+/// Free an IRQ object
+pub fn freeIrqObject(irq_obj: *IrqObject) void {
+    const index = (@intFromPtr(irq_obj) - @intFromPtr(&irq_object_pool)) / @sizeOf(IrqObject);
+    if (index < MAX_IRQ_OBJECTS) {
+        irq_object_used[index] = false;
+    }
+}
+
+/// I/O port object pool
+const MAX_IOPORT_OBJECTS: usize = 32;
+var ioport_object_pool: [MAX_IOPORT_OBJECTS]IoPortObject = undefined;
+var ioport_object_used: [MAX_IOPORT_OBJECTS]bool = [_]bool{false} ** MAX_IOPORT_OBJECTS;
+
+/// Create an I/O port object for a port range
+pub fn createIoPortObject(port_start: u16, port_count: u16) ?*IoPortObject {
+    // Allocate new I/O port object
+    for (&ioport_object_used, 0..) |*used, i| {
+        if (!used.*) {
+            used.* = true;
+            ioport_object_pool[i] = IoPortObject.init(port_start, port_count);
+            return &ioport_object_pool[i];
+        }
+    }
+    return null; // Pool full
+}
+
+/// Free an I/O port object
+pub fn freeIoPortObject(ioport_obj: *IoPortObject) void {
+    const index = (@intFromPtr(ioport_obj) - @intFromPtr(&ioport_object_pool)) / @sizeOf(IoPortObject);
+    if (index < MAX_IOPORT_OBJECTS) {
+        ioport_object_used[index] = false;
+    }
 }
