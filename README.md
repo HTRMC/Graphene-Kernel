@@ -7,6 +7,7 @@ A minimal x86_64 monolithic kernel written in Zig.
 ### Windows
 
 1. **MSYS2** - Install from https://www.msys2.org/
+
    ```bash
    # In MSYS2 terminal, install xorriso
    pacman -S xorriso
@@ -34,7 +35,7 @@ Clone the repository and run:
 .\run.bat
 
 # This will:
-# 1. Download Zig 0.15.2 (first run only)
+# 1. Download Zig 0.16.0-dev.1859+212968c57 (first run only)
 # 2. Compile the kernel
 ```
 
@@ -76,8 +77,8 @@ graphene-kernel/
 
 ## Dependencies (auto-downloaded)
 
-| Dependency | Purpose | Location |
-|------------|---------|----------|
-| Zig | Compiler | `compiler/zig/` |
-| Limine | Bootloader | `limine/` |
-| OVMF | UEFI firmware for QEMU | `ovmf/` |
+| Dependency | Purpose                | Location        |
+| ---------- | ---------------------- | --------------- |
+| Zig        | Compiler               | `compiler/zig/` |
+| Limine     | Bootloader             | `limine/`       |
+| OVMF       | UEFI firmware for QEMU | `ovmf/`         |
