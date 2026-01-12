@@ -68,7 +68,7 @@ pub const Message = struct {
         for (0..len) |i| {
             self.data[i] = data[i];
         }
-        self.header.length = @truncate(len);
+        self.header.length = @intCast(len);
     }
 
     /// Get data from message
@@ -227,7 +227,6 @@ pub fn recv(endpoint: *Endpoint, msg: *Message, receiver_caps: ?*capability.CapT
     // Check if there's a waiting sender
     if (endpoint.send_queue.dequeue()) |sender| {
         // Get message from sender (simplified)
-        _ = sender;
         // In full implementation, would copy from sender's staging area
         scheduler.wake(sender);
         return;
@@ -247,7 +246,7 @@ pub fn recv(endpoint: *Endpoint, msg: *Message, receiver_caps: ?*capability.CapT
 }
 
 /// Call (send + wait for reply)
-pub fn call(endpoint: *Endpoint, msg: *const Message, reply: *Message, caps: ?*capability.CapTable) IpcError!void {
+pub fn call(endpoint: *Endpoint, msg: *const Message, reply_msg: *Message, caps: ?*capability.CapTable) IpcError!void {
     // Set wants_reply flag
     var send_msg = msg.*;
     send_msg.header.flags.wants_reply = true;
@@ -256,7 +255,7 @@ pub fn call(endpoint: *Endpoint, msg: *const Message, reply: *Message, caps: ?*c
 
     // Wait for reply on same endpoint (simplified)
     // In full implementation, would have reply endpoint
-    try recv(endpoint, reply, caps);
+    try recv(endpoint, reply_msg, caps);
 }
 
 /// Reply to a call
@@ -301,7 +300,6 @@ pub fn tryRecv(endpoint: *Endpoint, msg: *Message) IpcError!bool {
 
     // Check for waiting sender
     if (endpoint.send_queue.dequeue()) |sender| {
-        _ = sender;
         // Transfer message from sender
         scheduler.wake(sender);
         return true;
