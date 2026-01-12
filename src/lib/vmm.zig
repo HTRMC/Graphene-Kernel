@@ -5,6 +5,13 @@ const pmm = @import("pmm.zig");
 const paging = @import("paging.zig");
 const framebuffer = @import("framebuffer.zig");
 
+/// Simple map flags for ELF loader and other uses
+pub const MapFlags = struct {
+    user: bool = false,
+    writable: bool = false,
+    executable: bool = false,
+};
+
 /// Virtual memory region flags
 pub const VmFlags = packed struct(u8) {
     read: bool = false,
@@ -50,7 +57,7 @@ const MAX_REGIONS: usize = 256;
 /// Address space structure
 pub const AddressSpace = struct {
     /// Root PML4 physical address
-    pml4_phys: u64,
+    pml4_phys: u64 = 0,
     /// Tracked regions (simple array for Phase 1)
     regions: [MAX_REGIONS]?VmRegion = [_]?VmRegion{null} ** MAX_REGIONS,
     region_count: usize = 0,
@@ -101,6 +108,94 @@ pub const AddressSpace = struct {
                 }
             }
         }
+    }
+
+    /// Map a single page with MapFlags
+    pub fn mapPage(self: *AddressSpace, vaddr: u64, paddr: u64, flags: MapFlags) VmmError!void {
+        const page_flags = paging.PageFlags{
+            .present = true,
+            .writable = flags.writable,
+            .user_accessible = flags.user,
+            .no_execute = !flags.executable,
+        };
+
+        paging.mapPageForce(self.pml4_phys, vaddr, paddr, page_flags) catch {
+            return VmmError.OutOfMemory;
+        };
+    }
+
+    /// Unmap a single page
+    pub fn unmapPage(self: *AddressSpace, vaddr: u64) void {
+        paging.unmapPage(self.pml4_phys, vaddr);
+    }
+
+    /// Translate virtual to physical address
+    pub fn translate(self: *AddressSpace, vaddr: u64) ?u64 {
+        return paging.translate(self.pml4_phys, vaddr);
+    }
+
+    /// Allocate and map a region with physical memory
+    pub fn allocateRegion(self: *AddressSpace, vaddr: u64, size: u64, flags: MapFlags) VmmError!u64 {
+        // W^X enforcement
+        if (flags.writable and flags.executable) {
+            return VmmError.WxViolation;
+        }
+
+        const aligned_vaddr = vaddr & ~@as(u64, pmm.PAGE_SIZE - 1);
+        const aligned_size = ((size + pmm.PAGE_SIZE - 1) / pmm.PAGE_SIZE) * pmm.PAGE_SIZE;
+        const num_pages = aligned_size / pmm.PAGE_SIZE;
+
+        // Convert to VmFlags for region tracking
+        const vm_flags = VmFlags{
+            .read = true,
+            .write = flags.writable,
+            .execute = flags.executable,
+            .user = flags.user,
+        };
+
+        // Add region tracking
+        try self.addRegion(.{
+            .start = aligned_vaddr,
+            .size = aligned_size,
+            .flags = vm_flags,
+        });
+
+        // Allocate and map each page
+        var current = aligned_vaddr;
+        var mapped: usize = 0;
+
+        while (mapped < num_pages) : ({
+            current += pmm.PAGE_SIZE;
+            mapped += 1;
+        }) {
+            const paddr = pmm.allocFrame() orelse {
+                // Rollback on OOM
+                var rollback = aligned_vaddr;
+                for (0..mapped) |_| {
+                    if (paging.translate(self.pml4_phys, rollback)) |pa| {
+                        pmm.freeFrame(pa);
+                    }
+                    paging.unmapPage(self.pml4_phys, rollback);
+                    rollback += pmm.PAGE_SIZE;
+                }
+                self.removeRegion(aligned_vaddr);
+                return VmmError.OutOfMemory;
+            };
+
+            // Zero the page
+            const page_virt: [*]u8 = @ptrFromInt(pmm.physToVirt(paddr));
+            for (0..pmm.PAGE_SIZE) |i| {
+                page_virt[i] = 0;
+            }
+
+            self.mapPage(current, paddr, flags) catch {
+                pmm.freeFrame(paddr);
+                self.removeRegion(aligned_vaddr);
+                return VmmError.OutOfMemory;
+            };
+        }
+
+        return aligned_vaddr;
     }
 };
 
