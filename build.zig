@@ -2,7 +2,7 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     // Freestanding x86_64 target for kernel (matches limine-zig-template)
-    var query: std.Target.Query = .{
+    var kernel_query: std.Target.Query = .{
         .cpu_arch = .x86_64,
         .os_tag = .freestanding,
         .abi = .none,
@@ -12,16 +12,16 @@ pub fn build(b: *std.Build) void {
     // Keep x87 FPU enabled as compiler-rt may need it
     // The template adds popcnt and soft_float, and subtracts only SIMD features
     const Target = std.Target.x86;
-    query.cpu_features_add = Target.featureSet(&.{ .popcnt, .soft_float });
-    query.cpu_features_sub = Target.featureSet(&.{ .avx, .avx2, .sse, .sse2, .mmx });
+    kernel_query.cpu_features_add = Target.featureSet(&.{ .popcnt, .soft_float });
+    kernel_query.cpu_features_sub = Target.featureSet(&.{ .avx, .avx2, .sse, .sse2, .mmx });
 
-    const target = b.resolveTargetQuery(query);
+    const kernel_target = b.resolveTargetQuery(kernel_query);
     const optimize = b.standardOptimizeOption(.{});
 
     // Create root module for kernel
     const kernel_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
-        .target = target,
+        .target = kernel_target,
         .optimize = optimize,
     });
 
@@ -38,13 +38,57 @@ pub fn build(b: *std.Build) void {
     // Use custom linker script
     kernel.setLinkerScript(b.path("linker.ld"));
 
-    // Enable verbose linking to debug
-    kernel.verbose_link = true;
-
     // Install the kernel binary
     b.installArtifact(kernel);
 
+    // ========================================
+    // User space: init process
+    // ========================================
+    var user_query: std.Target.Query = .{
+        .cpu_arch = .x86_64,
+        .os_tag = .freestanding,
+        .abi = .none,
+    };
+    // Disable SIMD and use soft float for user space
+    user_query.cpu_features_add = Target.featureSet(&.{.soft_float});
+    user_query.cpu_features_sub = Target.featureSet(&.{ .avx, .avx2, .sse, .sse2, .mmx });
+
+    const user_target = b.resolveTargetQuery(user_query);
+
+    // User syscall library module
+    const syscall_module = b.createModule(.{
+        .root_source_file = b.path("user/lib/syscall.zig"),
+        .target = user_target,
+        .optimize = optimize,
+    });
+
+    // Init process module
+    const init_module = b.createModule(.{
+        .root_source_file = b.path("user/init/main.zig"),
+        .target = user_target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "syscall", .module = syscall_module },
+        },
+    });
+
+    init_module.red_zone = false;
+
+    // Init executable
+    const init = b.addExecutable(.{
+        .name = "init",
+        .root_module = init_module,
+    });
+
+    // Use user linker script
+    init.setLinkerScript(b.path("user/linker-user.ld"));
+
+    // Install init binary
+    b.installArtifact(init);
+
+    // ========================================
     // Build ISO step
+    // ========================================
     const iso_cmd = b.addSystemCommand(&.{
         "cmd", "/c", "scripts\\build-iso.bat",
     });
