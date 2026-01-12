@@ -4,6 +4,8 @@
 const object = @import("object.zig");
 const pmm = @import("pmm.zig");
 const gdt = @import("gdt.zig");
+const usermode = @import("usermode.zig");
+const vmm = @import("vmm.zig");
 
 /// Thread states
 pub const ThreadState = enum(u8) {
@@ -335,4 +337,84 @@ pub fn countActive() u32 {
         if (used) count += 1;
     }
     return count;
+}
+
+/// Create a user thread
+/// process: The owning process (must have address space set up)
+/// entry: User-space entry point
+/// user_stack: User-space stack pointer
+pub fn createUser(process: *anyopaque, entry: u64, user_stack: u64) ?*Thread {
+    const t = allocThread() orelse return null;
+
+    // Allocate kernel stack (for syscall handling)
+    const stack_pages = KERNEL_STACK_SIZE / pmm.PAGE_SIZE;
+    const stack_phys = pmm.allocFrames(stack_pages) orelse {
+        freeThread(t);
+        return null;
+    };
+
+    const stack_virt = pmm.physToVirt(stack_phys);
+    t.kernel_stack = stack_virt;
+    t.kernel_stack_top = stack_virt + KERNEL_STACK_SIZE;
+
+    // Set up initial context on kernel stack
+    const context_addr = t.kernel_stack_top - @sizeOf(ThreadContext);
+    t.context = @ptrFromInt(context_addr);
+
+    // Initialize context - entry point is the user thread trampoline
+    t.context.* = ThreadContext{
+        .rip = @intFromPtr(&userThreadEntry),
+        .rbp = 0,
+    };
+
+    // Store user entry point and stack for the trampoline
+    t.entry = entry;
+    t.user_stack = user_stack;
+    t.process = process;
+
+    // User thread flags
+    t.flags.kernel_thread = false;
+    t.state = .ready;
+
+    return t;
+}
+
+/// User thread entry point (runs in kernel mode, switches to user mode)
+fn userThreadEntry() callconv(.c) noreturn {
+    const t = getCurrentThreadUnsafe() orelse {
+        // No thread - halt
+        asm volatile ("cli");
+        while (true) {
+            asm volatile ("hlt");
+        }
+    };
+
+    // Switch to process address space
+    // Get the process and switch to its address space
+    const proc_ptr = t.process orelse {
+        asm volatile ("cli");
+        while (true) {
+            asm volatile ("hlt");
+        }
+    };
+
+    // Access process address space (Process type defined elsewhere)
+    // For now, we assume the address space is already active or we use a simpler approach
+    const proc = @as(*const struct {
+        base: object.Object,
+        pid: u32,
+        name: [32]u8,
+        address_space: ?*vmm.AddressSpace,
+    }, @ptrCast(@alignCast(proc_ptr)));
+
+    if (proc.address_space) |space| {
+        // Switch to process address space
+        vmm.switchAddressSpace(space);
+    }
+
+    // Set TSS kernel stack for returns from user mode
+    gdt.setKernelStack(t.kernel_stack_top);
+
+    // Jump to user mode
+    usermode.jumpToUser(t.entry, t.user_stack, 0);
 }
