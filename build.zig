@@ -97,6 +97,42 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(init);
 
     // ========================================
+    // User space: shell process
+    // ========================================
+    const shell_main_module = b.createModule(.{
+        .root_source_file = b.path("user/shell/main.zig"),
+        .target = user_target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "syscall", .module = syscall_module },
+        },
+    });
+
+    const shell_module = b.createModule(.{
+        .root_source_file = b.path("user/lib/start.zig"),
+        .target = user_target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "syscall", .module = syscall_module },
+            .{ .name = "main", .module = shell_main_module },
+        },
+    });
+
+    shell_module.red_zone = false;
+
+    // Shell executable
+    const shell = b.addExecutable(.{
+        .name = "shell",
+        .root_module = shell_module,
+    });
+
+    // Use user linker script
+    shell.setLinkerScript(b.path("user/linker-user.ld"));
+
+    // Install shell binary
+    b.installArtifact(shell);
+
+    // ========================================
     // Build ISO step
     // ========================================
     const iso_cmd = b.addSystemCommand(&.{
