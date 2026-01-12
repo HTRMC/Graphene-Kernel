@@ -13,7 +13,7 @@ A minimal x86_64 monolithic kernel written in Zig.
    pacman -S xorriso
    ```
 
-2. **QEMU** - Install from https://www.qemu.org/download/#windows
+2. **QEMU** - Install from https://www.qemu.org/download/#windows or https://qemu.weilnetz.de/w64/
    - Add to PATH or install to default location
 
 ### Linux
