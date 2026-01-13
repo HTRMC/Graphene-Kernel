@@ -133,17 +133,22 @@ fn grantHardwareCapabilities(entry: *DriverEntry) bool {
     // Grant IRQ capability if requested
     if (entry.irq) |irq_num| {
         // Create IRQ object
-        const irq_obj = object.createIrqObject(irq_num) orelse return false;
+        const irq_obj = object.createIrqObject(irq_num) orelse {
+            framebuffer.puts("drv: IRQ obj create fail", 10, 420, 0x00ff0000);
+            return false;
+        };
 
         // Find free capability slot
         const slot = cap_table.findFreeSlot() orelse {
             object.freeIrqObject(irq_obj);
+            framebuffer.puts("drv: no free slot", 10, 420, 0x00ff0000);
             return false;
         };
 
         // Insert capability with full rights
         capability.insertAt(cap_table, slot, &irq_obj.base, capability.Rights.ALL) catch {
             object.freeIrqObject(irq_obj);
+            framebuffer.puts("drv: cap insert fail", 10, 420, 0x00ff0000);
             return false;
         };
 
