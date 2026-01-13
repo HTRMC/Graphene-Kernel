@@ -42,6 +42,8 @@ pub const SyscallNumber = enum(u64) {
     getchar = 21, // Read character from keyboard buffer (blocking)
     endpoint_create = 22, // Create IPC endpoint
     channel_create = 23, // Create IPC channel (bidirectional)
+    process_count = 24, // Get count of active processes
+    process_list = 25, // Get list of process info
     _,
 };
 
@@ -58,6 +60,15 @@ pub const SyscallError = enum(i64) {
     not_implemented = -8,
     type_mismatch = -9,
     table_full = -10,
+};
+
+/// Process information entry (for process_list syscall)
+pub const ProcessInfoEntry = extern struct {
+    pid: u32,
+    state: u8,
+    thread_count: u8,
+    _pad: [2]u8 = .{ 0, 0 },
+    name: [32]u8,
 };
 
 /// MSR addresses for syscall/sysret
@@ -168,6 +179,8 @@ fn dispatch(num: u64, args: [6]u64) i64 {
         .getchar => sysGetchar(args),
         .endpoint_create => sysEndpointCreate(args),
         .channel_create => sysChannelCreate(args),
+        .process_count => sysProcessCount(args),
+        .process_list => sysProcessList(args),
         _ => @intFromEnum(SyscallError.invalid_syscall),
     };
 }
@@ -815,9 +828,69 @@ fn sysCapInfo(args: [6]u64) i64 {
 }
 
 fn sysProcessInfo(args: [6]u64) i64 {
-    // process_info(what) -> returns various process info
+    // process_info(pid, entry_ptr) -> fill ProcessInfoEntry for given PID
+    const pid: u32 = @truncate(args[0]);
+    const entry_ptr = args[1];
+
+    // Validate user buffer
+    if (!usermode.isUserAddress(entry_ptr)) {
+        return @intFromEnum(SyscallError.invalid_argument);
+    }
+
+    // Find the process
+    const proc = process.getByPid(pid) orelse {
+        return @intFromEnum(SyscallError.not_found);
+    };
+
+    // Fill the entry
+    const entry: *ProcessInfoEntry = @ptrFromInt(entry_ptr);
+    entry.pid = proc.pid;
+    entry.state = @intFromEnum(proc.state);
+    entry.thread_count = @truncate(proc.thread_count);
+    entry._pad = .{ 0, 0 };
+    entry.name = proc.name;
+
+    return @intFromEnum(SyscallError.success);
+}
+
+fn sysProcessCount(args: [6]u64) i64 {
+    // process_count() -> returns count of active processes
     _ = args;
-    return @intFromEnum(SyscallError.not_implemented);
+    return @intCast(process.countActive());
+}
+
+fn sysProcessList(args: [6]u64) i64 {
+    // process_list(buf_ptr, max_count) -> fill array of ProcessInfoEntry
+    const buf_ptr = args[0];
+    const max_count = args[1];
+
+    // Validate user buffer
+    if (max_count > 0 and !usermode.isUserAddress(buf_ptr)) {
+        return @intFromEnum(SyscallError.invalid_argument);
+    }
+
+    // Limit to reasonable size
+    const actual_max = @min(max_count, 64);
+    if (actual_max == 0) {
+        return 0;
+    }
+
+    // Get process list
+    var proc_buf: [64]*process.Process = undefined;
+    const count = process.getActiveList(&proc_buf, actual_max);
+
+    // Fill user buffer
+    const entries: [*]ProcessInfoEntry = @ptrFromInt(buf_ptr);
+    for (0..count) |i| {
+        const proc = proc_buf[i];
+        entries[i].pid = proc.pid;
+        entries[i].state = @intFromEnum(proc.state);
+        entries[i].thread_count = @truncate(proc.thread_count);
+        entries[i]._pad = .{ 0, 0 };
+        entries[i].name = proc.name;
+    }
+
+    return @intCast(count);
 }
 
 fn sysIoPortRead(args: [6]u64) i64 {
@@ -1115,6 +1188,8 @@ pub fn getName(num: u64) []const u8 {
         .getchar => "getchar",
         .endpoint_create => "endpoint_create",
         .channel_create => "channel_create",
+        .process_count => "process_count",
+        .process_list => "process_list",
         _ => "unknown",
     };
 }
