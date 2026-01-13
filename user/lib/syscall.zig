@@ -21,6 +21,8 @@ pub const SyscallNumber = enum(u64) {
     debug_print = 15,
     cap_info = 16,
     process_info = 17,
+    io_port_read = 18,
+    io_port_write = 19,
 };
 
 /// Syscall error codes
@@ -218,6 +220,29 @@ pub fn irqWait(cap_slot: u32) i64 {
 /// Acknowledge IRQ
 pub fn irqAck(cap_slot: u32) i64 {
     return syscall1(@intFromEnum(SyscallNumber.irq_ack), cap_slot);
+}
+
+/// Read from I/O port (requires I/O port capability)
+/// width: 1 = byte, 2 = word, 4 = dword
+pub fn ioPortRead(cap_slot: u32, port: u16, width: u8) i64 {
+    return syscall3(
+        @intFromEnum(SyscallNumber.io_port_read),
+        cap_slot,
+        port,
+        width,
+    );
+}
+
+/// Write to I/O port (requires I/O port capability)
+/// width: 1 = byte, 2 = word, 4 = dword
+pub fn ioPortWrite(cap_slot: u32, port: u16, value: u32, width: u8) i64 {
+    return syscall4(
+        @intFromEnum(SyscallNumber.io_port_write),
+        cap_slot,
+        port,
+        value,
+        width,
+    );
 }
 
 // ============================================================================
