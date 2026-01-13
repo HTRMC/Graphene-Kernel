@@ -190,8 +190,15 @@ pub fn send(endpoint: *Endpoint, msg: *const Message, sender_caps: ?*capability.
 
     // Check if there's a waiting receiver
     if (endpoint.recv_queue.dequeue()) |receiver| {
-        // Direct handoff
-        transferMessage(msg, receiver, sender_caps);
+        // Direct handoff - copy to receiver's staging buffer
+        const recv_buf: ?*Message = @ptrCast(@alignCast(receiver.ipc_msg_buffer));
+        const recv_caps: ?*capability.CapTable = @ptrCast(@alignCast(receiver.ipc_cap_table));
+        if (recv_buf) |buf| {
+            transferMessage(msg, buf, sender_caps, recv_caps);
+        }
+        // Clear receiver's staging
+        receiver.ipc_msg_buffer = null;
+        receiver.ipc_cap_table = null;
         scheduler.wake(receiver);
         return;
     }
@@ -208,17 +215,20 @@ pub fn send(endpoint: *Endpoint, msg: *const Message, sender_caps: ?*capability.
     // Synchronous mode - block until receiver arrives
     const sender = scheduler.getCurrent() orelse return IpcError.NotConnected;
 
-    // Store message in sender's context (simplified - would use proper staging)
+    // Store message pointer in sender's staging for receiver to collect
+    sender.ipc_send_msg = msg;
+    sender.ipc_cap_table = sender_caps;
+
     endpoint.send_queue.enqueue(sender);
     scheduler.blockCurrent(&endpoint.send_queue);
 
-    // After waking, message has been transferred
+    // Clear staging after waking
+    sender.ipc_send_msg = null;
+    sender.ipc_cap_table = null;
 }
 
 /// Receive message from endpoint (blocking)
 pub fn recv(endpoint: *Endpoint, msg: *Message, receiver_caps: ?*capability.CapTable) IpcError!void {
-    _ = receiver_caps;
-
     // Check for pending messages (async mode)
     if (endpoint.pending.dequeue(msg)) {
         return;
@@ -226,8 +236,15 @@ pub fn recv(endpoint: *Endpoint, msg: *Message, receiver_caps: ?*capability.CapT
 
     // Check if there's a waiting sender
     if (endpoint.send_queue.dequeue()) |sender| {
-        // Get message from sender (simplified)
-        // In full implementation, would copy from sender's staging area
+        // Get message from sender's staging area
+        const send_msg: ?*const Message = @ptrCast(@alignCast(sender.ipc_send_msg));
+        const send_caps: ?*capability.CapTable = @ptrCast(@alignCast(sender.ipc_cap_table));
+        if (send_msg) |src| {
+            transferMessage(src, msg, send_caps, receiver_caps);
+        }
+        // Clear sender's staging
+        sender.ipc_send_msg = null;
+        sender.ipc_cap_table = null;
         scheduler.wake(sender);
         return;
     }
@@ -236,13 +253,18 @@ pub fn recv(endpoint: *Endpoint, msg: *Message, receiver_caps: ?*capability.CapT
         return IpcError.EndpointClosed;
     }
 
-    // No sender waiting - block
+    // No sender waiting - block and set staging for when sender arrives
     const receiver = scheduler.getCurrent() orelse return IpcError.NotConnected;
+
+    // Set staging buffers so sender can copy directly
+    receiver.ipc_msg_buffer = msg;
+    receiver.ipc_cap_table = receiver_caps;
 
     endpoint.recv_queue.enqueue(receiver);
     scheduler.blockCurrent(&endpoint.recv_queue);
 
-    // After waking, message is in staging area
+    // After waking, message has been copied to msg by sender
+    // Staging is cleared by sender
 }
 
 /// Call (send + wait for reply)
@@ -259,24 +281,36 @@ pub fn call(endpoint: *Endpoint, msg: *const Message, reply_msg: *Message, caps:
 }
 
 /// Reply to a call
-pub fn reply(receiver: *thread.Thread, msg: *const Message) IpcError!void {
+pub fn reply(receiver: *thread.Thread, msg: *const Message, sender_caps: ?*capability.CapTable) IpcError!void {
     var reply_msg = msg.*;
     reply_msg.header.flags.is_reply = true;
 
-    // Wake receiver and transfer message
-    transferMessage(&reply_msg, receiver, null);
+    // Copy to receiver's staging buffer
+    const recv_buf: ?*Message = @ptrCast(@alignCast(receiver.ipc_msg_buffer));
+    const recv_caps: ?*capability.CapTable = @ptrCast(@alignCast(receiver.ipc_cap_table));
+    if (recv_buf) |buf| {
+        transferMessage(&reply_msg, buf, sender_caps, recv_caps);
+    }
+    receiver.ipc_msg_buffer = null;
+    receiver.ipc_cap_table = null;
     scheduler.wake(receiver);
 }
 
 /// Non-blocking send
-pub fn trySend(endpoint: *Endpoint, msg: *const Message) IpcError!bool {
+pub fn trySend(endpoint: *Endpoint, msg: *const Message, sender_caps: ?*capability.CapTable) IpcError!bool {
     if (endpoint.flags.closed) {
         return IpcError.EndpointClosed;
     }
 
     // Check if there's a waiting receiver
     if (endpoint.recv_queue.dequeue()) |receiver| {
-        transferMessage(msg, receiver, null);
+        const recv_buf: ?*Message = @ptrCast(@alignCast(receiver.ipc_msg_buffer));
+        const recv_caps: ?*capability.CapTable = @ptrCast(@alignCast(receiver.ipc_cap_table));
+        if (recv_buf) |buf| {
+            transferMessage(msg, buf, sender_caps, recv_caps);
+        }
+        receiver.ipc_msg_buffer = null;
+        receiver.ipc_cap_table = null;
         scheduler.wake(receiver);
         return true;
     }
@@ -292,7 +326,7 @@ pub fn trySend(endpoint: *Endpoint, msg: *const Message) IpcError!bool {
 }
 
 /// Non-blocking receive
-pub fn tryRecv(endpoint: *Endpoint, msg: *Message) IpcError!bool {
+pub fn tryRecv(endpoint: *Endpoint, msg: *Message, receiver_caps: ?*capability.CapTable) IpcError!bool {
     // Check for pending messages
     if (endpoint.pending.dequeue(msg)) {
         return true;
@@ -300,7 +334,14 @@ pub fn tryRecv(endpoint: *Endpoint, msg: *Message) IpcError!bool {
 
     // Check for waiting sender
     if (endpoint.send_queue.dequeue()) |sender| {
-        // Transfer message from sender
+        // Get message from sender's staging area
+        const send_msg: ?*const Message = @ptrCast(@alignCast(sender.ipc_send_msg));
+        const send_caps: ?*capability.CapTable = @ptrCast(@alignCast(sender.ipc_cap_table));
+        if (send_msg) |src| {
+            transferMessage(src, msg, send_caps, receiver_caps);
+        }
+        sender.ipc_send_msg = null;
+        sender.ipc_cap_table = null;
         scheduler.wake(sender);
         return true;
     }
@@ -309,14 +350,46 @@ pub fn tryRecv(endpoint: *Endpoint, msg: *Message) IpcError!bool {
 }
 
 /// Transfer message (internal helper)
-fn transferMessage(msg: *const Message, receiver: *thread.Thread, sender_caps: ?*capability.CapTable) void {
-    _ = receiver;
-    _ = sender_caps;
-    // In full implementation:
-    // 1. Copy message data to receiver's buffer
-    // 2. Transfer capabilities from sender to receiver's cap table
-    // 3. Clear transferred caps from sender
-    _ = msg;
+/// Copies message from source to destination, including capability transfer
+fn transferMessage(
+    from: *const Message,
+    to: *Message,
+    from_caps: ?*capability.CapTable,
+    to_caps: ?*capability.CapTable,
+) void {
+    // Copy message header
+    to.header = from.header;
+
+    // Copy message data
+    const len = @min(from.header.length, MAX_INLINE_DATA);
+    for (0..len) |i| {
+        to.data[i] = from.data[i];
+    }
+
+    // Transfer capabilities if both tables exist
+    if (from_caps != null and to_caps != null) {
+        const cap_count = @min(from.header.cap_count, MAX_CAPS_PER_MSG);
+        for (0..cap_count) |i| {
+            const src_slot = from.caps[i];
+            if (src_slot != capability.INVALID_SLOT) {
+                // Copy capability to receiver's table
+                if (capability.copyToTable(from_caps.?, src_slot, to_caps.?, capability.Rights.ALL)) |dst_slot| {
+                    to.caps[i] = dst_slot;
+                    // Transfer semantics: remove from sender
+                    capability.delete(from_caps.?, src_slot);
+                } else |_| {
+                    to.caps[i] = capability.INVALID_SLOT;
+                }
+            } else {
+                to.caps[i] = capability.INVALID_SLOT;
+            }
+        }
+    } else {
+        // No capability tables - just clear caps
+        for (&to.caps) |*c| {
+            c.* = capability.INVALID_SLOT;
+        }
+    }
 }
 
 /// Create IPC endpoint
