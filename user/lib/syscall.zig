@@ -27,6 +27,8 @@ pub const SyscallNumber = enum(u64) {
     getchar = 21,
     endpoint_create = 22,
     channel_create = 23,
+    process_count = 24,
+    process_list = 25,
 };
 
 /// Syscall error codes
@@ -42,6 +44,15 @@ pub const SyscallError = enum(i64) {
     not_implemented = -8,
     type_mismatch = -9,
     table_full = -10,
+};
+
+/// Process information entry (matches kernel's ProcessInfoEntry)
+pub const ProcessInfoEntry = extern struct {
+    pid: u32,
+    state: u8,
+    thread_count: u8,
+    _pad: [2]u8 = .{ 0, 0 },
+    name: [32]u8,
 };
 
 /// Raw syscall with 0-6 arguments
@@ -297,5 +308,26 @@ pub fn channelCreate(slot0: *u32, slot1: *u32) i64 {
         @intFromEnum(SyscallNumber.channel_create),
         @intFromPtr(slot0),
         @intFromPtr(slot1),
+    );
+}
+
+// ============================================================================
+// Process Information Functions
+// ============================================================================
+
+/// Get count of active processes
+/// Returns the count on success, negative error code on failure
+pub fn processCount() i64 {
+    return syscall0(@intFromEnum(SyscallNumber.process_count));
+}
+
+/// Get list of process information
+/// Fills the buffer with ProcessInfoEntry structures
+/// Returns count of entries written on success, negative error code on failure
+pub fn processList(buf: [*]ProcessInfoEntry, max_count: usize) i64 {
+    return syscall2(
+        @intFromEnum(SyscallNumber.process_list),
+        @intFromPtr(buf),
+        max_count,
     );
 }
