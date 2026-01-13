@@ -38,6 +38,8 @@ pub const SyscallNumber = enum(u64) {
     process_info = 17, // Get process info
     io_port_read = 18, // Read from I/O port
     io_port_write = 19, // Write to I/O port
+    kbd_putchar = 20, // Keyboard driver sends character
+    getchar = 21, // Read character from keyboard buffer (blocking)
     _,
 };
 
@@ -160,6 +162,8 @@ fn dispatch(num: u64, args: [6]u64) i64 {
         .process_info => sysProcessInfo(args),
         .io_port_read => sysIoPortRead(args),
         .io_port_write => sysIoPortWrite(args),
+        .kbd_putchar => sysKbdPutchar(args),
+        .getchar => sysGetchar(args),
         _ => @intFromEnum(SyscallError.invalid_syscall),
     };
 }
@@ -930,6 +934,64 @@ fn sysIoPortWrite(args: [6]u64) i64 {
     return @intFromEnum(SyscallError.success);
 }
 
+// ============================================================================
+// Keyboard Input Buffer (for shell input)
+// ============================================================================
+
+const KBD_BUFFER_SIZE: usize = 256;
+var kbd_buffer: [KBD_BUFFER_SIZE]u8 = undefined;
+var kbd_read_pos: usize = 0;
+var kbd_write_pos: usize = 0;
+var kbd_count: usize = 0;
+var kbd_wait_queue: thread.WaitQueue = .{};
+
+fn sysKbdPutchar(args: [6]u64) i64 {
+    // kbd_putchar(char) - keyboard driver sends a character to the buffer
+    const c: u8 = @truncate(args[0]);
+
+    // Only allow driver processes to call this
+    const proc = process.getCurrentProcess() orelse {
+        return @intFromEnum(SyscallError.permission_denied);
+    };
+    if (!proc.flags.driver_process) {
+        return @intFromEnum(SyscallError.permission_denied);
+    }
+
+    // Check if buffer is full
+    if (kbd_count >= KBD_BUFFER_SIZE) {
+        return @intFromEnum(SyscallError.would_block);
+    }
+
+    // Add character to buffer
+    kbd_buffer[kbd_write_pos] = c;
+    kbd_write_pos = (kbd_write_pos + 1) % KBD_BUFFER_SIZE;
+    kbd_count += 1;
+
+    // Wake up any waiting reader
+    if (kbd_wait_queue.dequeue()) |waiting_thread| {
+        scheduler.wake(waiting_thread);
+    }
+
+    return @intFromEnum(SyscallError.success);
+}
+
+fn sysGetchar(args: [6]u64) i64 {
+    // getchar() - read a character from keyboard buffer, blocks if empty
+    _ = args;
+
+    // If buffer is empty, block until a character is available
+    while (kbd_count == 0) {
+        scheduler.blockCurrent(&kbd_wait_queue);
+    }
+
+    // Read character from buffer
+    const c = kbd_buffer[kbd_read_pos];
+    kbd_read_pos = (kbd_read_pos + 1) % KBD_BUFFER_SIZE;
+    kbd_count -= 1;
+
+    return @as(i64, c);
+}
+
 /// Check if syscall is initialized
 pub fn isInitialized() bool {
     return syscall_initialized;
@@ -959,6 +1021,8 @@ pub fn getName(num: u64) []const u8 {
         .process_info => "process_info",
         .io_port_read => "io_port_read",
         .io_port_write => "io_port_write",
+        .kbd_putchar => "kbd_putchar",
+        .getchar => "getchar",
         _ => "unknown",
     };
 }
