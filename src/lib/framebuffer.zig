@@ -30,6 +30,9 @@ pub fn putPixel(x: u32, y: u32, color: u32) void {
 // Simple 8x8 bitmap font
 const font = @import("font.zig").font;
 
+/// Background color for text (dark blue to match screen clear)
+const TEXT_BG: u32 = 0x001a1a2e;
+
 pub fn putChar(c: u8, x: u32, y: u32, color: u32) void {
     if (c < 32 or c > 126) return;
     const glyph = font[c - 32];
@@ -40,6 +43,8 @@ pub fn putChar(c: u8, x: u32, y: u32, color: u32) void {
         while (col < 8) : (col += 1) {
             if ((glyph[row] >> @intCast(7 - col)) & 1 == 1) {
                 putPixel(x + col, y + row, color);
+            } else {
+                putPixel(x + col, y + row, TEXT_BG);
             }
         }
     }
