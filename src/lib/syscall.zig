@@ -733,7 +733,9 @@ fn sysIrqAck(args: [6]u64) i64 {
 }
 
 /// Debug print Y position (advances with each print)
-var debug_y: u32 = 300;
+/// Starts at Y=450 to avoid overlapping with kernel init messages (Y=150-430)
+/// Wraps at Y=620 to avoid panic area (Y=640+)
+var debug_y: u32 = 450;
 
 fn sysDebugPrint(args: [6]u64) i64 {
     // debug_print(str_ptr, str_len)
@@ -772,11 +774,24 @@ fn sysDebugPrint(args: [6]u64) i64 {
 
     // Update position for next print
     debug_y = y + 16;
-    if (debug_y > 580) {
-        debug_y = 300; // Wrap around
+    if (debug_y > 620) {
+        // Clear the user output area before wrapping
+        clearUserOutputArea();
+        debug_y = 450;
     }
 
     return @intCast(str_len);
+}
+
+/// Clear the user output area (Y 450-620) to prepare for wrap-around
+fn clearUserOutputArea() void {
+    var py: u32 = 450;
+    while (py < 630) : (py += 1) {
+        var px: u32 = 0;
+        while (px < 800) : (px += 1) {
+            framebuffer.putPixel(px, py, 0x001a1a2e);
+        }
+    }
 }
 
 fn sysCapInfo(args: [6]u64) i64 {
