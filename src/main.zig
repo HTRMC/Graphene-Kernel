@@ -150,7 +150,7 @@ export fn _start() callconv(.c) noreturn {
     var init_loaded = false;
     if (module_request.response) |mod_response| {
         const modules = mod_response.getModules();
-        printInfo("Loading boot modules...");
+        printInfo("Loading boot modules..."); // TODO: make sure this text doesnt overlap. the text Running in user mode!
 
         for (modules) |module| {
             const module_name = parseModuleCmdline(module.string);
@@ -162,13 +162,13 @@ export fn _start() callconv(.c) noreturn {
                     printOk("Loaded: init");
                 }
             } else if (strEql(module_name, "kbd")) {
-                // Load keyboard driver with IRQ 1 and I/O ports 0x60-0x64
-                if (loadDriverProcess(module, "kbd", .keyboard, 1, 0x60, 5)) {
-                    printOk("Loaded: kbd (keyboard driver)");
+                // Load kbd as regular process
+                if (loadInitProcess(module)) {
+                    printOk("Loaded: kbd");
                 }
             } else if (strEql(module_name, "shell")) {
                 // Shell is loaded by init via IPC, not directly by kernel
-                printInfo("Found: shell (loaded by init)");
+                printInfo("Found: shell (loaded by init)"); // TODO: make sure this text doesnt overlap. the text User space operational.
             } else {
                 // Unknown module - try to load as generic driver
                 printInfo("Skipping unknown module");
