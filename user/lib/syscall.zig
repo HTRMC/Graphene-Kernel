@@ -25,6 +25,8 @@ pub const SyscallNumber = enum(u64) {
     io_port_write = 19,
     kbd_putchar = 20,
     getchar = 21,
+    endpoint_create = 22,
+    channel_create = 23,
 };
 
 /// Syscall error codes
@@ -275,4 +277,25 @@ pub fn kbdPutchar(c: u8) i64 {
 /// Read a character from keyboard buffer (blocks if empty)
 pub fn getchar() i64 {
     return syscall0(@intFromEnum(SyscallNumber.getchar));
+}
+
+// ============================================================================
+// IPC Functions
+// ============================================================================
+
+/// Create an IPC endpoint
+/// Returns the capability slot on success, negative error code on failure
+pub fn endpointCreate() i64 {
+    return syscall0(@intFromEnum(SyscallNumber.endpoint_create));
+}
+
+/// Create a bidirectional IPC channel
+/// Returns two endpoint capability slots via the provided pointers
+/// Returns 0 on success, negative error code on failure
+pub fn channelCreate(slot0: *u32, slot1: *u32) i64 {
+    return syscall2(
+        @intFromEnum(SyscallNumber.channel_create),
+        @intFromPtr(slot0),
+        @intFromPtr(slot1),
+    );
 }
