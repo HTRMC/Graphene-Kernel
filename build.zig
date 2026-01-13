@@ -133,6 +133,42 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(shell);
 
     // ========================================
+    // User space: keyboard driver
+    // ========================================
+    const kbd_main_module = b.createModule(.{
+        .root_source_file = b.path("user/drivers/kbd/main.zig"),
+        .target = user_target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "syscall", .module = syscall_module },
+        },
+    });
+
+    const kbd_module = b.createModule(.{
+        .root_source_file = b.path("user/lib/start.zig"),
+        .target = user_target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "syscall", .module = syscall_module },
+            .{ .name = "main", .module = kbd_main_module },
+        },
+    });
+
+    kbd_module.red_zone = false;
+
+    // Keyboard driver executable
+    const kbd = b.addExecutable(.{
+        .name = "kbd",
+        .root_module = kbd_module,
+    });
+
+    // Use user linker script
+    kbd.setLinkerScript(b.path("user/linker-user.ld"));
+
+    // Install kbd binary
+    b.installArtifact(kbd);
+
+    // ========================================
     // Build ISO step
     // ========================================
     const iso_cmd = b.addSystemCommand(&.{
