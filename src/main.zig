@@ -167,8 +167,10 @@ export fn _start() callconv(.c) noreturn {
                     printOk("Loaded: kbd (IRQ 1, ports 0x60-0x64)");
                 }
             } else if (strEql(module_name, "shell")) {
-                // Shell is loaded by init via IPC, not directly by kernel
-                printInfo("Found: shell (loaded by init)"); // TODO: make sure this text doesnt overlap. the text User space operational.
+                // Load shell as a user process
+                if (loadUserProcess(module, "shell")) {
+                    printOk("Loaded: shell");
+                }
             } else {
                 // Unknown module - try to load as generic driver
                 printInfo("Skipping unknown module");
@@ -292,6 +294,61 @@ fn strEql(a: []const u8, b: []const u8) bool {
     for (a, b) |ac, bc| {
         if (ac != bc) return false;
     }
+    return true;
+}
+
+/// Load a generic user process from boot module
+fn loadUserProcess(module: *limine.File, name: []const u8) bool {
+    const module_addr: u64 = @intFromPtr(module.address);
+    const module_size = module.size;
+
+    if (module_size == 0) {
+        printFail("User module is empty");
+        return false;
+    }
+
+    const module_data: [*]const u8 = @ptrFromInt(module_addr);
+    const data_slice = module_data[0..module_size];
+
+    if (!elf.isElf(data_slice)) {
+        printFail("User module is not a valid ELF");
+        return false;
+    }
+
+    const user_proc = process.create(null) orelse {
+        printFail("Failed to create user process");
+        return false;
+    };
+
+    user_proc.setName(name);
+
+    const space = user_proc.address_space orelse {
+        printFail("User process has no address space");
+        process.destroy(user_proc);
+        return false;
+    };
+
+    const load_result = elf.load(space, data_slice) catch {
+        printFail("Failed to load user ELF");
+        process.destroy(user_proc);
+        return false;
+    };
+
+    _ = usermode.allocateUserStack(space) catch {
+        printFail("Failed to allocate user stack");
+        process.destroy(user_proc);
+        return false;
+    };
+
+    const user_thread = thread.createUser(user_proc, load_result.entry_point, usermode.USER_STACK_TOP - 8) orelse {
+        printFail("Failed to create user thread");
+        process.destroy(user_proc);
+        return false;
+    };
+
+    _ = user_proc.addThread(user_thread);
+    scheduler.enqueue(user_thread);
+
     return true;
 }
 
