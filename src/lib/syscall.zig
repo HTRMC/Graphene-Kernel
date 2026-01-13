@@ -761,6 +761,13 @@ fn sysDebugPrint(args: [6]u64) i64 {
         if (c == '\n') {
             debug_x = 10;
             debug_y += 16;
+        } else if (c == 8) {
+            // Backspace - move cursor back and clear character
+            if (debug_x > 10) {
+                debug_x -= 8;
+                // Clear the character by drawing a space (background color)
+                framebuffer.putChar(' ', debug_x, debug_y, 0x001a1a2e);
+            }
         } else if (c >= 32 and c < 127) {
             framebuffer.putChar(c, debug_x, debug_y, 0x0000ff00); // Green for user output
             debug_x += 8;
