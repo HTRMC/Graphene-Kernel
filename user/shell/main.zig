@@ -63,6 +63,7 @@ fn cmdHelp() void {
     syscall.print("  yield    - Yield CPU time slice\n");
     syscall.print("  caps     - Show capability types\n");
     syscall.print("  ipc-test - Test IPC functionality\n");
+    syscall.print("  ps       - List running processes\n");
 }
 
 fn cmdClear() void {
@@ -142,6 +143,94 @@ fn cmdIpcTest() void {
     syscall.print("or multiple processes.\n");
 }
 
+fn cmdPs() void {
+    syscall.print("PID   STATE    THREADS  NAME\n");
+    syscall.print("----  -------  -------  ----------------\n");
+
+    // Get process count
+    const count_result = syscall.processCount();
+    if (count_result < 0) {
+        syscall.print("Error getting process count\n");
+        return;
+    }
+
+    // Allocate buffer on stack (max 16 processes)
+    var entries: [16]syscall.ProcessInfoEntry = undefined;
+    const max_entries: usize = @min(@as(usize, @intCast(@as(u64, @bitCast(count_result)))), 16);
+
+    const list_result = syscall.processList(&entries, max_entries);
+    if (list_result < 0) {
+        syscall.print("Error getting process list\n");
+        return;
+    }
+
+    const actual_count: usize = @intCast(@as(u64, @bitCast(list_result)));
+
+    for (0..actual_count) |i| {
+        const entry = entries[i];
+
+        // Print PID (right-padded)
+        printNumPadded(entry.pid, 4);
+        syscall.print("  ");
+
+        // Print state
+        switch (entry.state) {
+            0 => syscall.print("running"),
+            1 => syscall.print("stopped"),
+            2 => syscall.print("zombie "),
+            else => syscall.print("unknown"),
+        }
+        syscall.print("  ");
+
+        // Print thread count
+        printNumPadded(entry.thread_count, 7);
+        syscall.print("  ");
+
+        // Print name (null-terminated)
+        printProcessName(&entry.name);
+        syscall.print("\n");
+    }
+}
+
+/// Print a number with padding
+fn printNumPadded(num: u32, width: usize) void {
+    var buf: [16]u8 = undefined;
+    var n = num;
+    var len: usize = 0;
+
+    if (n == 0) {
+        // Print padding spaces
+        for (0..width - 1) |_| {
+            syscall.print(" ");
+        }
+        syscall.print("0");
+        return;
+    }
+
+    while (n > 0 and len < buf.len) : (len += 1) {
+        buf[buf.len - 1 - len] = @truncate((n % 10) + '0');
+        n /= 10;
+    }
+
+    // Print padding spaces
+    if (len < width) {
+        for (0..width - len) |_| {
+            syscall.print(" ");
+        }
+    }
+
+    _ = syscall.debugPrint(buf[buf.len - len ..]);
+}
+
+/// Print process name (null-terminated from fixed array)
+fn printProcessName(name: *const [32]u8) void {
+    var len: usize = 0;
+    while (len < 32 and name[len] != 0) : (len += 1) {}
+    if (len > 0) {
+        _ = syscall.debugPrint(name[0..len]);
+    }
+}
+
 /// Print a signed number
 fn printSignedNum(num: i64) void {
     if (num < 0) {
@@ -194,6 +283,8 @@ fn executeCommand(cmd: []const u8) void {
         cmdCaps();
     } else if (strEql(command, "ipc-test")) {
         cmdIpcTest();
+    } else if (strEql(command, "ps")) {
+        cmdPs();
     } else {
         cmdUnknown(command);
     }
