@@ -104,15 +104,18 @@ pub fn main() i32 {
 
         // Backspace
         if (scancode == SC_BACKSPACE) {
+            // Send backspace to buffer and echo to screen
+            _ = syscall.kbdPutchar(8);
             const buf = [_]u8{8};
             _ = syscall.debugPrint(&buf);
             _ = syscall.irqAck(IRQ_CAP);
             continue;
         }
 
-        // Regular key - convert and print
+        // Regular key - convert, send to buffer, and echo to screen
         const ascii = scancodeToAscii(scancode);
         if (ascii != 0) {
+            _ = syscall.kbdPutchar(ascii);
             const buf = [_]u8{ascii};
             _ = syscall.debugPrint(&buf);
         }
