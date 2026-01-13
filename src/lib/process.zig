@@ -102,7 +102,8 @@ pub const ProcessState = enum(u8) {
 pub const ProcessFlags = packed struct(u8) {
     kernel_process: bool = false, // Kernel-only process
     init_process: bool = false, // Init (PID 1)
-    _reserved: u6 = 0,
+    driver_process: bool = false, // User-space driver
+    _reserved: u5 = 0,
 };
 
 /// Process pool for Phase 1
