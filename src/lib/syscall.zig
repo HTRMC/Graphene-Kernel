@@ -40,6 +40,8 @@ pub const SyscallNumber = enum(u64) {
     io_port_write = 19, // Write to I/O port
     kbd_putchar = 20, // Keyboard driver sends character
     getchar = 21, // Read character from keyboard buffer (blocking)
+    endpoint_create = 22, // Create IPC endpoint
+    channel_create = 23, // Create IPC channel (bidirectional)
     _,
 };
 
@@ -164,6 +166,8 @@ fn dispatch(num: u64, args: [6]u64) i64 {
         .io_port_write => sysIoPortWrite(args),
         .kbd_putchar => sysKbdPutchar(args),
         .getchar => sysGetchar(args),
+        .endpoint_create => sysEndpointCreate(args),
+        .channel_create => sysChannelCreate(args),
         _ => @intFromEnum(SyscallError.invalid_syscall),
     };
 }
@@ -992,6 +996,92 @@ fn sysGetchar(args: [6]u64) i64 {
     return @as(i64, c);
 }
 
+// ============================================================================
+// IPC Endpoint/Channel Creation
+// ============================================================================
+
+fn sysEndpointCreate(args: [6]u64) i64 {
+    // endpoint_create() - create a new IPC endpoint, returns capability slot
+    _ = args;
+
+    const proc = process.getCurrentProcess() orelse {
+        return @intFromEnum(SyscallError.permission_denied);
+    };
+
+    const cap_table = proc.cap_table orelse {
+        return @intFromEnum(SyscallError.invalid_capability);
+    };
+
+    // Create endpoint
+    const endpoint = ipc.createEndpoint() orelse {
+        return @intFromEnum(SyscallError.out_of_memory);
+    };
+
+    // Find free slot
+    const slot = cap_table.findFreeSlot() orelse {
+        return @intFromEnum(SyscallError.table_full);
+    };
+
+    // Insert capability with full rights (send + handle)
+    capability.insertAt(cap_table, slot, &endpoint.base, capability.Rights.ALL) catch {
+        return @intFromEnum(SyscallError.table_full);
+    };
+
+    return @as(i64, slot);
+}
+
+fn sysChannelCreate(args: [6]u64) i64 {
+    // channel_create(slot1_ptr, slot2_ptr) - create bidirectional channel
+    // Returns two endpoint capability slots via pointers
+    const slot1_ptr = args[0];
+    const slot2_ptr = args[1];
+
+    const proc = process.getCurrentProcess() orelse {
+        return @intFromEnum(SyscallError.permission_denied);
+    };
+
+    const cap_table = proc.cap_table orelse {
+        return @intFromEnum(SyscallError.invalid_capability);
+    };
+
+    // Validate user pointers
+    if (!usermode.isUserAddress(slot1_ptr) or !usermode.isUserAddress(slot2_ptr)) {
+        return @intFromEnum(SyscallError.invalid_argument);
+    }
+
+    // Create channel (two connected endpoints)
+    const channel = ipc.createChannel() orelse {
+        return @intFromEnum(SyscallError.out_of_memory);
+    };
+
+    // Find two free slots
+    const slot1 = cap_table.findFreeSlot() orelse {
+        return @intFromEnum(SyscallError.table_full);
+    };
+
+    const slot2 = cap_table.findFreeSlot() orelse {
+        return @intFromEnum(SyscallError.table_full);
+    };
+
+    // Insert capabilities for both endpoints
+    capability.insertAt(cap_table, slot1, &channel.endpoints[0].base, capability.Rights.ALL) catch {
+        return @intFromEnum(SyscallError.table_full);
+    };
+
+    capability.insertAt(cap_table, slot2, &channel.endpoints[1].base, capability.Rights.ALL) catch {
+        capability.delete(cap_table, slot1);
+        return @intFromEnum(SyscallError.table_full);
+    };
+
+    // Write slots to user space
+    const user_slot1: *u32 = @ptrFromInt(slot1_ptr);
+    const user_slot2: *u32 = @ptrFromInt(slot2_ptr);
+    user_slot1.* = slot1;
+    user_slot2.* = slot2;
+
+    return @intFromEnum(SyscallError.success);
+}
+
 /// Check if syscall is initialized
 pub fn isInitialized() bool {
     return syscall_initialized;
@@ -1023,6 +1113,8 @@ pub fn getName(num: u64) []const u8 {
         .io_port_write => "io_port_write",
         .kbd_putchar => "kbd_putchar",
         .getchar => "getchar",
+        .endpoint_create => "endpoint_create",
+        .channel_create => "channel_create",
         _ => "unknown",
     };
 }
