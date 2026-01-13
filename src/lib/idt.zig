@@ -331,12 +331,18 @@ fn handleException(frame: *InterruptFrame) void {
         }
 
         // VMM couldn't handle it - panic
-        framebuffer.puts("PAGE FAULT!", 10, 200, 0x00ff0000);
-        framebuffer.puts("Address: (see CR2)", 10, 220, 0x00ff0000);
+        framebuffer.puts("PAGE FAULT", 10, 640, 0x00ff0000);
+        framebuffer.puts("CR2:", 10, 660, 0x00ff0000);
+        printHex64(cr2, 50, 660);
+        framebuffer.puts("ERR:", 10, 680, 0x00ff0000);
+        printHex64(frame.error_code, 50, 680);
     } else {
         const name = if (vector < exception_names.len) exception_names[vector] else "Unknown";
-        framebuffer.puts("KERNEL PANIC!", 10, 200, 0x00ff0000);
-        framebuffer.puts(name, 10, 220, 0x00ff0000);
+        framebuffer.puts("PANIC:", 10, 640, 0x00ff0000);
+        framebuffer.puts(name, 70, 640, 0x00ff0000);
+        // Print the RIP where the exception occurred
+        framebuffer.puts("RIP:", 10, 660, 0x00ff0000);
+        printHex64(frame.rip, 50, 660);
     }
 
     // Halt on unhandled exception
@@ -396,4 +402,19 @@ pub fn areEnabled() bool {
         : [flags] "=r" (-> u64),
     );
     return (flags & (1 << 9)) != 0;
+}
+
+/// Print a 64-bit value as hex for debugging
+fn printHex64(value: u64, x: u32, y: u32) void {
+    const hex_chars = "0123456789ABCDEF";
+    var buf: [18]u8 = undefined;
+    buf[0] = '0';
+    buf[1] = 'x';
+    var v = value;
+    var i: usize = 17;
+    while (i >= 2) : (i -= 1) {
+        buf[i] = hex_chars[@truncate(v & 0xF)];
+        v >>= 4;
+    }
+    framebuffer.puts(&buf, x, y, 0x00ff8888);
 }
