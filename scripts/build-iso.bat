@@ -41,6 +41,12 @@ if exist "zig-out\bin\shell" (
     echo Copied shell process to ISO
 )
 
+:: Copy keyboard driver (if it exists)
+if exist "zig-out\bin\kbd" (
+    copy "zig-out\bin\kbd" "%ISO_ROOT%\boot\kbd"
+    echo Copied keyboard driver to ISO
+)
+
 :: Copy Limine config
 copy "limine.conf" "%ISO_ROOT%\boot\limine\limine.conf"
 
