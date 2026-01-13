@@ -144,6 +144,26 @@ pub const InterruptFrame = extern struct {
 var idt: [IDT_ENTRIES]IdtEntry = [_]IdtEntry{IdtEntry.missing()} ** IDT_ENTRIES;
 var idt_pointer: IdtPointer = undefined;
 
+// Debug: keyboard IRQ counter
+var kbd_irq_count: u32 = 0;
+
+fn showKbdIrqCount() void {
+    // Show IRQ count at fixed position (bottom right area)
+    const hex_chars = "0123456789ABCDEF";
+    var buf: [12]u8 = undefined;
+    buf[0] = 'I';
+    buf[1] = 'R';
+    buf[2] = 'Q';
+    buf[3] = ':';
+    var v = kbd_irq_count;
+    var i: usize = 11;
+    while (i >= 4) : (i -= 1) {
+        buf[i] = hex_chars[@intCast(v & 0xF)];
+        v >>= 4;
+    }
+    framebuffer.puts(&buf, 700, 10, 0x00ffff00);
+}
+
 /// Exception names for debugging
 const exception_names = [_][]const u8{
     "Divide Error",
@@ -361,6 +381,22 @@ fn handleIrq(frame: *InterruptFrame) void {
             // Timer interrupt - call scheduler tick
             if (scheduler.isRunning()) {
                 scheduler.tick();
+            }
+        },
+        1 => {
+            // Keyboard IRQ - debug: show IRQ count
+            kbd_irq_count += 1;
+            showKbdIrqCount();
+
+            // Wake user-space driver if registered
+            if (object.getIrqObject(1)) |irq_obj| {
+                // Increment pending count (IRQ fired)
+                irq_obj.pending_count += 1;
+
+                // Wake one waiting driver thread if any
+                if (irq_obj.wait_queue.dequeue()) |waiting_thread| {
+                    scheduler.wake(waiting_thread);
+                }
             }
         },
         else => {
