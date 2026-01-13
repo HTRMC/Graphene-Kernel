@@ -99,6 +99,19 @@ pub const Thread = struct {
 
     /// Entry argument
     arg: u64 = 0,
+
+    // ========================================
+    // IPC staging (for message passing)
+    // ========================================
+
+    /// Staging buffer for receiving messages
+    ipc_msg_buffer: ?*anyopaque = null, // *ipc.Message
+
+    /// Capability table for IPC transfers
+    ipc_cap_table: ?*anyopaque = null, // *capability.CapTable
+
+    /// Staging buffer for sending messages (when blocked)
+    ipc_send_msg: ?*const anyopaque = null, // *const ipc.Message
 };
 
 /// Default time slice quantum (ticks)
