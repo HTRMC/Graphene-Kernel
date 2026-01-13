@@ -11,6 +11,13 @@ pub fn build(b: *std.Build) void {
 
     const optimize = b.standardOptimizeOption(.{});
 
+    // Shared syscall module
+    const syscall_module = b.createModule(.{
+        .root_source_file = b.path("lib/syscall.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Build init process
     const init = b.addExecutable(.{
         .name = "init",
@@ -19,27 +26,25 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // Add library modules
-    init.root_module.addImport("syscall", b.createModule(.{
-        .root_source_file = b.path("lib/syscall.zig"),
-        .target = target,
-        .optimize = optimize,
-    }));
-
-    // Use custom linker script
+    init.root_module.addImport("syscall", syscall_module);
     init.setLinkerScript(b.path("linker-user.ld"));
-
-    // Disable standard library features not available in freestanding
     init.root_module.red_zone = false;
     init.root_module.stack_check = false;
 
-    // Install the binary
     b.installArtifact(init);
 
-    // Create raw binary for embedding
-    const init_raw = init.addObjCopy(.{
-        .format = .bin,
+    // Build keyboard driver
+    const kbd = b.addExecutable(.{
+        .name = "kbd",
+        .root_source_file = b.path("drivers/kbd/main.zig"),
+        .target = target,
+        .optimize = optimize,
     });
-    const install_raw = b.addInstallBinFile(init_raw.getOutput(), "init.bin");
-    b.getInstallStep().dependOn(&install_raw.step);
+
+    kbd.root_module.addImport("syscall", syscall_module);
+    kbd.setLinkerScript(b.path("linker-user.ld"));
+    kbd.root_module.red_zone = false;
+    kbd.root_module.stack_check = false;
+
+    b.installArtifact(kbd);
 }
