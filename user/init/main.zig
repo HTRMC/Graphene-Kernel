@@ -10,7 +10,7 @@ pub fn main() i32 {
     syscall.print("Running in user mode!\n");
 
     // Print version info
-    syscall.print("Init process v0.1.0\n");
+    syscall.print("Init process v0.1.0\n"); // TODO: make sure this text doesnt overlap. the text [Ok] Loaded: init
 
     // In a full implementation, init would:
     // 1. Mount filesystems
