@@ -5,7 +5,7 @@ const thread = @import("thread.zig");
 const process = @import("process.zig");
 const gdt = @import("gdt.zig");
 const pic = @import("pic.zig");
-const framebuffer = @import("framebuffer.zig");
+const vmm = @import("vmm.zig");
 
 /// Scheduler tick rate (Hz)
 pub const TICK_RATE: u32 = 1000; // 1ms ticks
@@ -272,6 +272,25 @@ pub fn schedule() void {
     // Update TSS kernel stack for user space returns
     gdt.setKernelStack(next.kernel_stack_top);
 
+    // Switch address space if changing processes
+    const old_proc_ptr = if (old) |o| o.process else null;
+    const new_proc_ptr = next.process;
+
+    if (new_proc_ptr) |np_raw| {
+        const np: *process.Process = @ptrCast(@alignCast(np_raw));
+        const should_switch = if (old_proc_ptr) |op_raw| blk: {
+            const op: *process.Process = @ptrCast(@alignCast(op_raw));
+            break :blk op != np;
+        } else true;
+
+        if (should_switch) {
+            if (np.address_space) |space| {
+                // Switch CR3 to new process's page tables
+                vmm.switchAddressSpace(space);
+            }
+        }
+    }
+
     // Perform context switch
     if (old) |o| {
         contextSwitch(&o.context, next.context);
@@ -281,20 +300,46 @@ pub fn schedule() void {
     }
 }
 
-/// Context switch (assembly)
-fn contextSwitch(old_ctx: **thread.ThreadContext, new_ctx: *thread.ThreadContext) void {
+/// Context switch implementation (naked - no prologue/epilogue)
+/// Arguments: RDI = old_ctx (pointer to pointer), RSI = new_ctx (pointer)
+fn contextSwitchImpl() callconv(.naked) void {
     asm volatile (
-    // Save callee-saved registers
+    // Save callee-saved registers onto current stack
         \\push %%rbx
         \\push %%rbp
         \\push %%r12
         \\push %%r13
         \\push %%r14
         \\push %%r15
-        // Save current RSP to old context
-        \\mov %%rsp, (%[old])
-        // Load new RSP from new context
-        \\mov %[new], %%rsp
+        // Save current RSP to old context pointer (RDI points to the pointer)
+        \\mov %%rsp, (%%rdi)
+        // Load new RSP from new context (RSI is the pointer)
+        \\mov %%rsi, %%rsp
+        // Restore callee-saved registers from new stack
+        \\pop %%r15
+        \\pop %%r14
+        \\pop %%r13
+        \\pop %%r12
+        \\pop %%rbp
+        \\pop %%rbx
+        // Return using the return address from the new stack
+        \\ret
+    );
+}
+
+/// Context switch wrapper - calls naked implementation via function pointer
+fn contextSwitch(old_ctx: **thread.ThreadContext, new_ctx: *thread.ThreadContext) void {
+    // Use function pointer to call naked function (workaround for Zig limitation)
+    const switchFn: *const fn (**thread.ThreadContext, *thread.ThreadContext) callconv(.c) void = @ptrCast(&contextSwitchImpl);
+    switchFn(old_ctx, new_ctx);
+}
+
+/// Load context implementation (naked)
+/// Argument: RDI = ctx (pointer to ThreadContext)
+fn loadContextImpl() callconv(.naked) noreturn {
+    asm volatile (
+        // Load RSP from context pointer (RDI)
+        \\mov %%rdi, %%rsp
         // Restore callee-saved registers
         \\pop %%r15
         \\pop %%r14
@@ -302,30 +347,15 @@ fn contextSwitch(old_ctx: **thread.ThreadContext, new_ctx: *thread.ThreadContext
         \\pop %%r12
         \\pop %%rbp
         \\pop %%rbx
-        // Return (pops RIP from stack)
+        // Return to the saved RIP
         \\ret
-        :
-        : [old] "r" (old_ctx),
-          [new] "r" (new_ctx),
-        : "~{memory}"
     );
 }
 
-/// Load context (for first thread)
+/// Load context wrapper (for first thread)
 fn loadContext(ctx: *thread.ThreadContext) noreturn {
-    asm volatile (
-        \\mov %[ctx], %%rsp
-        \\pop %%r15
-        \\pop %%r14
-        \\pop %%r13
-        \\pop %%r12
-        \\pop %%rbp
-        \\pop %%rbx
-        \\ret
-        :
-        : [ctx] "r" (ctx),
-    );
-    unreachable;
+    const loadFn: *const fn (*thread.ThreadContext) callconv(.c) noreturn = @ptrCast(&loadContextImpl);
+    loadFn(ctx);
 }
 
 /// Yield current time slice
