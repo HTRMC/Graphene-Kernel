@@ -11,8 +11,11 @@ const IOPORT_CAP: u32 = 1; // I/O ports 0x60-0x64 capability
 const DATA_PORT: u16 = 0x60;
 const STATUS_PORT: u16 = 0x64;
 
-/// Status register bits
-const STATUS_OUTPUT_FULL: u8 = 0x01;
+/// Special scancodes
+const SC_BACKSPACE: u8 = 0x0E;
+const SC_LEFT_SHIFT: u8 = 0x2A;
+const SC_RIGHT_SHIFT: u8 = 0x36;
+const SC_CAPS_LOCK: u8 = 0x3A;
 
 /// Simple US keyboard scancode to ASCII table (set 1, make codes only)
 const scancode_table = [_]u8{
@@ -22,55 +25,100 @@ const scancode_table = [_]u8{
     'b', 'n', 'm', ',', '.', '/', 0,   '*', 0,   ' ', 0,   0,   0,   0,   0,   0, // 0x30-0x3F
 };
 
+/// Shifted scancode table (with shift held)
+const scancode_table_shifted = [_]u8{
+    0,   27,  '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', 8,   '\t', // 0x00-0x0F
+    'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\n', 0,   'A', 'S', // 0x10-0x1F
+    'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '"', '~', 0,   '|', 'Z', 'X', 'C', 'V', // 0x20-0x2F
+    'B', 'N', 'M', '<', '>', '?', 0,   '*', 0,   ' ', 0,   0,   0,   0,   0,   0, // 0x30-0x3F
+};
+
+/// Keyboard state
+var shift_pressed: bool = false;
+var caps_lock: bool = false;
+
 /// Convert scancode to ASCII character
 fn scancodeToAscii(scancode: u8) u8 {
-    // Ignore break codes (key release) - high bit set
-    if (scancode & 0x80 != 0) return 0;
-
     if (scancode < scancode_table.len) {
-        return scancode_table[scancode];
+        var ascii = if (shift_pressed)
+            scancode_table_shifted[scancode]
+        else
+            scancode_table[scancode];
+
+        // Apply caps lock to letters only (toggles case)
+        if (caps_lock) {
+            if (ascii >= 'a' and ascii <= 'z') {
+                ascii = ascii - 32; // Convert to uppercase
+            } else if (ascii >= 'A' and ascii <= 'Z') {
+                ascii = ascii + 32; // Convert to lowercase (shift+caps = lowercase)
+            }
+        }
+
+        return ascii;
     }
     return 0;
 }
 
 /// Main entry point for keyboard driver
 pub fn main() i32 {
-    syscall.print("kbd: PS/2 keyboard driver starting\n");
+    syscall.print("kbd: driver started\n");
 
-    // Main driver loop
-    var key_count: u32 = 0;
     while (true) {
-        // Wait for keyboard IRQ
         const wait_result = syscall.irqWait(IRQ_CAP);
         if (wait_result < 0) {
             syscall.print("kbd: irqWait failed\n");
             break;
         }
 
-        // Read scancode from data port
         const scancode_result = syscall.ioPortRead(IOPORT_CAP, DATA_PORT, 1);
         if (scancode_result < 0) {
-            syscall.print("kbd: ioPortRead failed\n");
-            // Acknowledge IRQ anyway to prevent lockup
             _ = syscall.irqAck(IRQ_CAP);
             continue;
         }
 
         const scancode: u8 = @truncate(@as(u64, @bitCast(scancode_result)));
 
-        // Convert to ASCII and print if valid
-        const ascii = scancodeToAscii(scancode);
-        if (ascii != 0) {
-            // Print the character
-            var buf: [2]u8 = .{ ascii, 0 };
-            _ = syscall.debugPrint(buf[0..1]);
-            key_count += 1;
+        // Skip break codes (key release) but track shift state
+        if (scancode & 0x80 != 0) {
+            const make_code = scancode & 0x7F;
+            if (make_code == SC_LEFT_SHIFT or make_code == SC_RIGHT_SHIFT) {
+                shift_pressed = false;
+            }
+            _ = syscall.irqAck(IRQ_CAP);
+            continue;
         }
 
-        // Acknowledge IRQ to allow more interrupts
+        // Track shift press
+        if (scancode == SC_LEFT_SHIFT or scancode == SC_RIGHT_SHIFT) {
+            shift_pressed = true;
+            _ = syscall.irqAck(IRQ_CAP);
+            continue;
+        }
+
+        // Toggle caps lock
+        if (scancode == SC_CAPS_LOCK) {
+            caps_lock = !caps_lock;
+            _ = syscall.irqAck(IRQ_CAP);
+            continue;
+        }
+
+        // Backspace
+        if (scancode == SC_BACKSPACE) {
+            const buf = [_]u8{8};
+            _ = syscall.debugPrint(&buf);
+            _ = syscall.irqAck(IRQ_CAP);
+            continue;
+        }
+
+        // Regular key - convert and print
+        const ascii = scancodeToAscii(scancode);
+        if (ascii != 0) {
+            const buf = [_]u8{ascii};
+            _ = syscall.debugPrint(&buf);
+        }
+
         _ = syscall.irqAck(IRQ_CAP);
     }
 
-    syscall.print("kbd: driver exiting\n");
     return 0;
 }
