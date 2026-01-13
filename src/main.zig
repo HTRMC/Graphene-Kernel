@@ -162,9 +162,9 @@ export fn _start() callconv(.c) noreturn {
                     printOk("Loaded: init");
                 }
             } else if (strEql(module_name, "kbd")) {
-                // Load kbd as regular process
-                if (loadInitProcess(module)) {
-                    printOk("Loaded: kbd");
+                // Load kbd as driver with IRQ 1 and I/O ports 0x60-0x64
+                if (loadDriverProcess(module, "kbd", driver.DriverType.keyboard, 1, 0x60, 5)) {
+                    printOk("Loaded: kbd (IRQ 1, ports 0x60-0x64)");
                 }
             } else if (strEql(module_name, "shell")) {
                 // Shell is loaded by init via IPC, not directly by kernel
