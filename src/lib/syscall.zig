@@ -732,9 +732,10 @@ fn sysIrqAck(args: [6]u64) i64 {
     return @intFromEnum(SyscallError.success);
 }
 
-/// Debug print Y position (advances with each print)
+/// Debug print position (advances inline, only newline moves to next line)
 /// Starts at Y=450 to avoid overlapping with kernel init messages (Y=150-430)
 /// Wraps at Y=620 to avoid panic area (Y=640+)
+var debug_x: u32 = 10;
 var debug_y: u32 = 450;
 
 fn sysDebugPrint(args: [6]u64) i64 {
@@ -755,29 +756,26 @@ fn sysDebugPrint(args: [6]u64) i64 {
     const str: [*]const u8 = @ptrFromInt(str_ptr);
     const slice = str[0..@min(str_len, 256)];
 
-    // Print to framebuffer
-    var y: u32 = debug_y;
-    var x: u32 = 10;
+    // Print to framebuffer - continue from current position
     for (slice) |c| {
         if (c == '\n') {
-            y += 16;
-            x = 10;
+            debug_x = 10;
+            debug_y += 16;
         } else if (c >= 32 and c < 127) {
-            framebuffer.putChar(c, x, y, 0x0000ff00); // Green for user output
-            x += 8;
-            if (x > 780) {
-                x = 10;
-                y += 16;
+            framebuffer.putChar(c, debug_x, debug_y, 0x0000ff00); // Green for user output
+            debug_x += 8;
+            if (debug_x > 780) {
+                debug_x = 10;
+                debug_y += 16;
             }
         }
-    }
 
-    // Update position for next print
-    debug_y = y + 16;
-    if (debug_y > 620) {
-        // Clear the user output area before wrapping
-        clearUserOutputArea();
-        debug_y = 450;
+        // Check for Y overflow after any line advance
+        if (debug_y > 620) {
+            clearUserOutputArea();
+            debug_x = 10;
+            debug_y = 450;
+        }
     }
 
     return @intCast(str_len);
