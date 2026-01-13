@@ -23,6 +23,8 @@ pub const SyscallNumber = enum(u64) {
     process_info = 17,
     io_port_read = 18,
     io_port_write = 19,
+    kbd_putchar = 20,
+    getchar = 21,
 };
 
 /// Syscall error codes
@@ -263,4 +265,14 @@ pub fn isError(result: i64) bool {
 pub fn toError(result: i64) ?SyscallError {
     if (result >= 0) return null;
     return @enumFromInt(result);
+}
+
+/// Send a character to the keyboard buffer (driver only)
+pub fn kbdPutchar(c: u8) i64 {
+    return syscall1(@intFromEnum(SyscallNumber.kbd_putchar), c);
+}
+
+/// Read a character from keyboard buffer (blocks if empty)
+pub fn getchar() i64 {
+    return syscall0(@intFromEnum(SyscallNumber.getchar));
 }
