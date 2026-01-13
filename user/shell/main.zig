@@ -56,12 +56,13 @@ fn printNum(num: u32) void {
 
 fn cmdHelp() void {
     syscall.print("Available commands:\n");
-    syscall.print("  help    - Show this help message\n");
-    syscall.print("  clear   - Clear the screen\n");
-    syscall.print("  info    - Show system information\n");
-    syscall.print("  echo    - Echo text back\n");
-    syscall.print("  yield   - Yield CPU time slice\n");
-    syscall.print("  caps    - Show capability types\n");
+    syscall.print("  help     - Show this help message\n");
+    syscall.print("  clear    - Clear the screen\n");
+    syscall.print("  info     - Show system information\n");
+    syscall.print("  echo     - Echo text back\n");
+    syscall.print("  yield    - Yield CPU time slice\n");
+    syscall.print("  caps     - Show capability types\n");
+    syscall.print("  ipc-test - Test IPC functionality\n");
 }
 
 fn cmdClear() void {
@@ -101,6 +102,54 @@ fn cmdCaps() void {
     syscall.print("  ipc_channel - IPC channels\n");
     syscall.print("  irq         - Hardware interrupts\n");
     syscall.print("  ioport      - I/O port access\n");
+}
+
+fn cmdIpcTest() void {
+    syscall.print("=== IPC Test ===\n");
+
+    // Test 1: Create an endpoint
+    syscall.print("Creating endpoint... ");
+    const ep_result = syscall.endpointCreate();
+    if (ep_result < 0) {
+        syscall.print("FAILED (error ");
+        printSignedNum(ep_result);
+        syscall.print(")\n");
+        return;
+    }
+    syscall.print("OK (slot ");
+    printNum(@intCast(@as(u64, @bitCast(ep_result))));
+    syscall.print(")\n");
+
+    // Test 2: Create a channel (bidirectional)
+    syscall.print("Creating channel... ");
+    var slot0: u32 = 0;
+    var slot1: u32 = 0;
+    const ch_result = syscall.channelCreate(&slot0, &slot1);
+    if (ch_result < 0) {
+        syscall.print("FAILED (error ");
+        printSignedNum(ch_result);
+        syscall.print(")\n");
+        return;
+    }
+    syscall.print("OK (slots ");
+    printNum(slot0);
+    syscall.print(", ");
+    printNum(slot1);
+    syscall.print(")\n");
+
+    syscall.print("\nIPC subsystem working!\n");
+    syscall.print("Note: Full send/recv test requires async mode\n");
+    syscall.print("or multiple processes.\n");
+}
+
+/// Print a signed number
+fn printSignedNum(num: i64) void {
+    if (num < 0) {
+        syscall.print("-");
+        printNum(@intCast(@as(u64, @bitCast(-num))));
+    } else {
+        printNum(@intCast(@as(u64, @bitCast(num))));
+    }
 }
 
 fn cmdUnknown(cmd: []const u8) void {
@@ -143,6 +192,8 @@ fn executeCommand(cmd: []const u8) void {
         cmdYield();
     } else if (strEql(command, "caps")) {
         cmdCaps();
+    } else if (strEql(command, "ipc-test")) {
+        cmdIpcTest();
     } else {
         cmdUnknown(command);
     }
