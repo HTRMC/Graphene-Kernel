@@ -301,6 +301,29 @@ pub fn countActive() u32 {
     return count;
 }
 
+/// Get list of active processes
+/// Fills buffer with process pointers, returns count written
+/// Includes kernel process (PID 0) first
+pub fn getActiveList(buf: []*Process, max: usize) usize {
+    var count: usize = 0;
+
+    // First add kernel process
+    if (count < max and kernel_process_initialized) {
+        buf[count] = &kernel_process;
+        count += 1;
+    }
+
+    // Then add user processes
+    for (&process_pool, process_used) |*proc, used| {
+        if (used and count < max) {
+            buf[count] = proc;
+            count += 1;
+        }
+    }
+
+    return count;
+}
+
 /// Check if process subsystem is initialized
 pub fn isInitialized() bool {
     return kernel_process_initialized;
