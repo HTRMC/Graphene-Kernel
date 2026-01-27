@@ -29,6 +29,8 @@ pub const SyscallNumber = enum(u64) {
     channel_create = 23,
     process_count = 24,
     process_list = 25,
+    mem_info = 26,
+    uptime = 27,
 };
 
 /// Syscall error codes
@@ -330,4 +332,34 @@ pub fn processList(buf: [*]ProcessInfoEntry, max_count: usize) i64 {
         @intFromPtr(buf),
         max_count,
     );
+}
+
+// ============================================================================
+// Memory Information Functions
+// ============================================================================
+
+/// Memory information structure (matches kernel's MemInfoResult)
+pub const MemInfoResult = extern struct {
+    total_bytes: u64,
+    free_bytes: u64,
+    used_bytes: u64,
+};
+
+/// Get memory statistics
+/// Returns 0 on success, negative error code on failure
+pub fn memInfo(result: *MemInfoResult) i64 {
+    return syscall1(
+        @intFromEnum(SyscallNumber.mem_info),
+        @intFromPtr(result),
+    );
+}
+
+// ============================================================================
+// System Information Functions
+// ============================================================================
+
+/// Get system uptime in scheduler ticks
+/// Returns tick count on success
+pub fn uptime() i64 {
+    return syscall0(@intFromEnum(SyscallNumber.uptime));
 }
