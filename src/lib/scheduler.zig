@@ -5,6 +5,7 @@ const thread = @import("thread.zig");
 const process = @import("process.zig");
 const gdt = @import("gdt.zig");
 const pic = @import("pic.zig");
+const apic = @import("apic.zig");
 const vmm = @import("vmm.zig");
 
 /// Scheduler tick rate (Hz)
@@ -157,7 +158,11 @@ fn idleLoop(_: u64) void {
 /// Start scheduler (never returns)
 pub fn start() noreturn {
     // Enable timer interrupt
-    pic.unmaskIrq(0); // PIT timer is IRQ 0
+    // APIC timer is already configured in main.zig if available
+    // Only unmask PIC IRQ 0 if using legacy PIC
+    if (!apic.isEnabled()) {
+        pic.unmaskIrq(0); // PIT timer is IRQ 0
+    }
 
     scheduler_running = true;
 
@@ -305,25 +310,25 @@ pub fn schedule() void {
 fn contextSwitchImpl() callconv(.naked) void {
     asm volatile (
     // Save callee-saved registers onto current stack
-        \\push %%rbx
-        \\push %%rbp
-        \\push %%r12
-        \\push %%r13
-        \\push %%r14
-        \\push %%r15
+        \\pushq %%rbx
+        \\pushq %%rbp
+        \\pushq %%r12
+        \\pushq %%r13
+        \\pushq %%r14
+        \\pushq %%r15
         // Save current RSP to old context pointer (RDI points to the pointer)
-        \\mov %%rsp, (%%rdi)
+        \\movq %%rsp, 0(%%rdi)
         // Load new RSP from new context (RSI is the pointer)
-        \\mov %%rsi, %%rsp
+        \\movq %%rsi, %%rsp
         // Restore callee-saved registers from new stack
-        \\pop %%r15
-        \\pop %%r14
-        \\pop %%r13
-        \\pop %%r12
-        \\pop %%rbp
-        \\pop %%rbx
+        \\popq %%r15
+        \\popq %%r14
+        \\popq %%r13
+        \\popq %%r12
+        \\popq %%rbp
+        \\popq %%rbx
         // Return using the return address from the new stack
-        \\ret
+        \\retq
     );
 }
 
@@ -339,16 +344,16 @@ fn contextSwitch(old_ctx: **thread.ThreadContext, new_ctx: *thread.ThreadContext
 fn loadContextImpl() callconv(.naked) noreturn {
     asm volatile (
         // Load RSP from context pointer (RDI)
-        \\mov %%rdi, %%rsp
+        \\movq %%rdi, %%rsp
         // Restore callee-saved registers
-        \\pop %%r15
-        \\pop %%r14
-        \\pop %%r13
-        \\pop %%r12
-        \\pop %%rbp
-        \\pop %%rbx
+        \\popq %%r15
+        \\popq %%r14
+        \\popq %%r13
+        \\popq %%r12
+        \\popq %%rbp
+        \\popq %%rbx
         // Return to the saved RIP
-        \\ret
+        \\retq
     );
 }
 
