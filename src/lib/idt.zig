@@ -5,6 +5,7 @@ const std = @import("std");
 const gdt = @import("gdt.zig");
 const framebuffer = @import("framebuffer.zig");
 const pic = @import("pic.zig");
+const apic = @import("apic.zig");
 const scheduler = @import("scheduler.zig");
 const syscall = @import("syscall.zig");
 const vmm = @import("vmm.zig");
@@ -198,10 +199,11 @@ pub fn init() void {
         .base = @intFromPtr(&idt),
     };
 
-    // Load IDT
-    asm volatile ("lidt (%[idt_ptr])"
+    // Load IDT - use lidtq for 64-bit explicit size
+    asm volatile (
+        \\lidtq 0(%%rax)
         :
-        : [idt_ptr] "r" (&idt_pointer),
+        : [idt_ptr] "{rax}" (&idt_pointer),
     );
 }
 
@@ -235,15 +237,18 @@ fn makeInterruptStub(comptime vector: u8, comptime has_error_code: bool) *const 
         fn stub() callconv(.naked) void {
             // Push dummy error code if CPU doesn't push one
             if (!has_error_code) {
-                asm volatile ("push $0");
+                asm volatile ("pushq $0");
             }
             // Push vector number
-            asm volatile ("push %[vec]"
+            asm volatile ("pushq %[vec]"
                 :
                 : [vec] "i" (@as(u64, vector)),
             );
             // Jump to common handler
-            asm volatile ("jmp interrupt_common");
+            asm volatile ("jmp %[common:P]"
+                :
+                : [common] "X" (&interruptCommon),
+            );
         }
     }.stub;
 }
@@ -251,58 +256,65 @@ fn makeInterruptStub(comptime vector: u8, comptime has_error_code: bool) *const 
 /// Syscall stub (vector 0x80)
 fn syscall_stub() callconv(.naked) void {
     asm volatile (
-        \\push $0          // No error code
-        \\push $0x80       // Vector
-        \\jmp interrupt_common
+        \\pushq $0          // No error code
+        \\pushq $0x80       // Vector
+    );
+    asm volatile ("jmp %[common:P]"
+        :
+        : [common] "X" (&interruptCommon),
     );
 }
 
 /// Common interrupt handler entry point
-export fn interrupt_common() callconv(.naked) void {
+fn interruptCommon() callconv(.naked) void {
     // Save all registers
     asm volatile (
-        \\push %%rax
-        \\push %%rbx
-        \\push %%rcx
-        \\push %%rdx
-        \\push %%rsi
-        \\push %%rdi
-        \\push %%rbp
-        \\push %%r8
-        \\push %%r9
-        \\push %%r10
-        \\push %%r11
-        \\push %%r12
-        \\push %%r13
-        \\push %%r14
-        \\push %%r15
+        \\pushq %%rax
+        \\pushq %%rbx
+        \\pushq %%rcx
+        \\pushq %%rdx
+        \\pushq %%rsi
+        \\pushq %%rdi
+        \\pushq %%rbp
+        \\pushq %%r8
+        \\pushq %%r9
+        \\pushq %%r10
+        \\pushq %%r11
+        \\pushq %%r12
+        \\pushq %%r13
+        \\pushq %%r14
+        \\pushq %%r15
         \\
-        \\mov %%rsp, %%rdi  // First argument: pointer to InterruptFrame
-        \\call interrupt_handler
+        \\movq %%rsp, %%rdi  // First argument: pointer to InterruptFrame
+    );
+    asm volatile ("call %[handler:P]"
+        :
+        : [handler] "X" (&interruptHandler),
+    );
+    asm volatile (
+        \\popq %%r15
+        \\popq %%r14
+        \\popq %%r13
+        \\popq %%r12
+        \\popq %%r11
+        \\popq %%r10
+        \\popq %%r9
+        \\popq %%r8
+        \\popq %%rbp
+        \\popq %%rdi
+        \\popq %%rsi
+        \\popq %%rdx
+        \\popq %%rcx
+        \\popq %%rbx
+        \\popq %%rax
         \\
-        \\pop %%r15
-        \\pop %%r14
-        \\pop %%r13
-        \\pop %%r12
-        \\pop %%r11
-        \\pop %%r10
-        \\pop %%r9
-        \\pop %%r8
-        \\pop %%rbp
-        \\pop %%rdi
-        \\pop %%rsi
-        \\pop %%rdx
-        \\pop %%rcx
-        \\pop %%rbx
-        \\pop %%rax
-        \\
-        \\add $16, %%rsp    // Pop error code and vector
+        \\addq $16, %%rsp    // Pop error code and vector
         \\iretq
     );
 }
 
 /// Main interrupt handler (called from assembly)
-export fn interrupt_handler(frame: *InterruptFrame) void {
+fn interruptHandler(frame: *InterruptFrame) void {
     const vector = frame.vector;
 
     if (vector < 32) {
@@ -387,8 +399,12 @@ fn handleIrq(frame: *InterruptFrame) void {
         },
     }
 
-    // Send End-Of-Interrupt to PIC
-    pic.sendEoi(irq);
+    // Send End-Of-Interrupt
+    if (apic.isEnabled()) {
+        apic.sendEoi();
+    } else {
+        pic.sendEoi(irq);
+    }
 }
 
 fn handleSyscall(frame: *InterruptFrame) void {
