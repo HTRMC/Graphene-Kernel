@@ -10,6 +10,7 @@ const scheduler = @import("scheduler.zig");
 const syscall = @import("syscall.zig");
 const vmm = @import("vmm.zig");
 const object = @import("object.zig");
+const serial = @import("serial.zig");
 
 /// Number of IDT entries (256 possible interrupt vectors)
 const IDT_ENTRIES = 256;
@@ -332,6 +333,9 @@ fn interruptHandler(frame: *InterruptFrame) void {
 fn handleException(frame: *InterruptFrame) void {
     const vector = frame.vector;
 
+    // Check if exception occurred in user mode (RPL = 3 in CS selector)
+    const in_user_mode = (frame.cs & 3) == 3;
+
     // For page faults, try VMM handler first
     if (vector == Exception.PAGE_FAULT) {
         const cr2 = asm volatile ("mov %%cr2, %[result]"
@@ -343,22 +347,113 @@ fn handleException(frame: *InterruptFrame) void {
             return; // Handled successfully
         }
 
-        // VMM couldn't handle it - panic
-        framebuffer.puts("PAGE FAULT", 10, 640, 0x00ff0000);
+        // If in user mode, terminate the process instead of panicking
+        if (in_user_mode) {
+            handleUserException(frame, "PAGE FAULT", cr2);
+            return;
+        }
+
+        // Kernel page fault - this is fatal
+        serial.println("\n!!! KERNEL PAGE FAULT !!!");
+        serial.puts("CR2: ");
+        serial.putHex(cr2);
+        serial.puts("\nError code: ");
+        serial.putHex(frame.error_code);
+        serial.puts("\nRIP: ");
+        serial.putHex(frame.rip);
+        serial.puts("\n");
+
+        framebuffer.puts("KERNEL PAGE FAULT", 10, 640, 0x00ff0000);
         framebuffer.puts("CR2:", 10, 660, 0x00ff0000);
         printHex64(cr2, 50, 660);
         framebuffer.puts("ERR:", 10, 680, 0x00ff0000);
         printHex64(frame.error_code, 50, 680);
     } else {
+        // If in user mode, terminate the process instead of panicking
+        if (in_user_mode) {
+            handleUserException(frame, if (vector < exception_names.len) exception_names[vector] else "Unknown", 0);
+            return;
+        }
+
+        // Kernel exception - fatal
         const name = if (vector < exception_names.len) exception_names[vector] else "Unknown";
-        framebuffer.puts("PANIC:", 10, 640, 0x00ff0000);
-        framebuffer.puts(name, 70, 640, 0x00ff0000);
-        // Print the RIP where the exception occurred
+
+        serial.println("\n!!! KERNEL PANIC !!!");
+        serial.puts("Exception: ");
+        serial.puts(name);
+        serial.puts("\nRIP: ");
+        serial.putHex(frame.rip);
+        serial.puts("\nError code: ");
+        serial.putHex(frame.error_code);
+        serial.puts("\n");
+
+        framebuffer.puts("KERNEL PANIC:", 10, 640, 0x00ff0000);
+        framebuffer.puts(name, 130, 640, 0x00ff0000);
         framebuffer.puts("RIP:", 10, 660, 0x00ff0000);
         printHex64(frame.rip, 50, 660);
     }
 
-    // Halt on unhandled exception
+    // Halt on kernel exception
+    asm volatile ("cli");
+    while (true) {
+        asm volatile ("hlt");
+    }
+}
+
+/// Handle exception in user mode - terminate the process gracefully
+fn handleUserException(frame: *InterruptFrame, reason: []const u8, fault_addr: u64) void {
+    // Log to serial console
+    serial.puts("\n[FAULT] User process exception: ");
+    serial.puts(reason);
+    serial.puts("\n");
+    serial.puts("[FAULT] RIP: ");
+    serial.putHex(frame.rip);
+    if (fault_addr != 0) {
+        serial.puts(" Fault address: ");
+        serial.putHex(fault_addr);
+    }
+    serial.puts("\n");
+
+    // Get current process and thread
+    const current_thread = scheduler.getCurrent();
+    if (current_thread) |t| {
+        const process = @import("process.zig");
+        if (t.process) |proc_ptr| {
+            const proc: *process.Process = @ptrCast(@alignCast(proc_ptr));
+            serial.puts("[FAULT] Process: ");
+            // Print process name (null-terminated)
+            for (proc.name) |c| {
+                if (c == 0) break;
+                serial.putChar(c);
+            }
+            serial.puts(" (PID ");
+            serial.putDec(proc.pid);
+            serial.puts(")\n");
+
+            // Mark process as crashed
+            proc.state = .zombie;
+            proc.exit_code = @bitCast(@as(u32, 0xFFFFFFFF)); // Signal abnormal termination (-1)
+
+            // Mark all threads as zombie
+            for (proc.threads) |maybe_thread| {
+                if (maybe_thread) |thread_ptr| {
+                    thread_ptr.state = .zombie;
+                }
+            }
+        }
+
+        // Mark current thread as zombie
+        t.state = .zombie;
+    }
+
+    serial.println("[FAULT] Process terminated, continuing scheduler");
+
+    // Yield to scheduler to run other processes
+    if (scheduler.isRunning()) {
+        scheduler.yield();
+    }
+
+    // If scheduler returns (shouldn't happen), halt
     asm volatile ("cli");
     while (true) {
         asm volatile ("hlt");
