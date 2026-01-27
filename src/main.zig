@@ -1,6 +1,7 @@
 // Graphene Kernel - Main Entry Point
 // Hybrid Microkernel with Capability-Based Security
 
+const builtin = @import("builtin");
 const limine = @import("lib/limine.zig");
 const framebuffer = @import("lib/framebuffer.zig");
 const gdt = @import("lib/gdt.zig");
@@ -16,6 +17,35 @@ const thread = @import("lib/thread.zig");
 const elf = @import("lib/elf.zig");
 const usermode = @import("lib/usermode.zig");
 const driver = @import("lib/driver.zig");
+const serial = @import("lib/serial.zig");
+const apic = @import("lib/apic.zig");
+
+/// Debug logging - only enabled in Debug builds
+const debug_enabled = builtin.mode == .Debug;
+
+fn debugPrint(comptime msg: []const u8) void {
+    if (debug_enabled) {
+        serial.println(msg);
+    }
+}
+
+fn debugPuts(str: []const u8) void {
+    if (debug_enabled) {
+        serial.puts(str);
+    }
+}
+
+fn debugHex(value: u64) void {
+    if (debug_enabled) {
+        serial.putHex(value);
+    }
+}
+
+fn debugDec(value: u64) void {
+    if (debug_enabled) {
+        serial.putDec(value);
+    }
+}
 
 // Limine request markers - placed in special section
 export var requests_start linksection(".limine_requests_start") = limine.RequestsStartMarker{};
@@ -34,40 +64,63 @@ var status_y: u32 = 150;
 fn printStatus(msg: []const u8, color: u32) void {
     framebuffer.puts(msg, 10, status_y, color);
     status_y += 20;
+    // Also print to serial
+    serial.println(msg);
 }
 
 fn printOk(msg: []const u8) void {
     framebuffer.puts("[OK] ", 10, status_y, 0x0000ff00);
     framebuffer.puts(msg, 50, status_y, 0x00ffffff);
     status_y += 20;
+    // Also print to serial
+    serial.puts("[OK] ");
+    serial.println(msg);
 }
 
 fn printFail(msg: []const u8) void {
     framebuffer.puts("[!!] ", 10, status_y, 0x00ff0000);
     framebuffer.puts(msg, 50, status_y, 0x00ff0000);
     status_y += 20;
+    // Also print to serial
+    serial.puts("[!!] ");
+    serial.println(msg);
 }
 
 fn printInfo(msg: []const u8) void {
     framebuffer.puts("     ", 10, status_y, 0x00888888);
     framebuffer.puts(msg, 50, status_y, 0x00888888);
     status_y += 20;
+    // Also print to serial
+    serial.puts("     ");
+    serial.println(msg);
 }
 
 // Kernel entry point
 export fn _start() callconv(.c) noreturn {
+    // Initialize serial console first for early debug output
+    serial.init();
+    serial.println("");
+    serial.println("=====================================");
+    serial.println("  Graphene Kernel v0.1.0");
+    serial.println("  Serial Console Initialized");
+    serial.println("=====================================");
+    serial.println("");
+
     // Verify Limine protocol version
     if (!base_revision.is_supported()) {
+        serial.println("[FATAL] Limine protocol version not supported!");
         halt();
     }
 
     // ========================================
     // Phase 1: CPU Structures
     // ========================================
+    serial.println("[BOOT] Phase 1: CPU Structures");
     gdt.init();
     pic.init();
     pic.maskAll();
     idt.init();
+    serial.println("[OK] GDT, PIC, IDT initialized");
 
     // ========================================
     // Phase 2: Framebuffer Setup
@@ -115,6 +168,16 @@ export fn _start() callconv(.c) noreturn {
     // Initialize VMM
     vmm.init();
     printOk("Virtual Memory Manager");
+
+    // Try to initialize APIC (modern interrupt controller)
+    // Must be after PMM init since APIC uses physToVirt for MMIO mapping
+    if (apic.init()) {
+        // Don't start timer yet - will be started after scheduler is ready
+        printOk("APIC initialized (modern interrupts)");
+    } else {
+        // Fall back to legacy PIC
+        printInfo("Using legacy PIC (APIC not available)");
+    }
 
     // Initialize Heap
     heap.init();
@@ -183,8 +246,17 @@ export fn _start() callconv(.c) noreturn {
         status_y += 10;
         printStatus("Starting scheduler...", 0x00ffffff);
 
-        // Enable interrupts and start scheduler
+        // Enable interrupts
         idt.enable();
+
+        // Now start APIC timer if APIC is enabled
+        if (apic.isEnabled()) {
+            apic.initTimer(100);
+        } else {
+            // Unmask PIC timer for fallback
+            pic.unmaskIrq(0);
+        }
+
         scheduler.start(); // Never returns
     } else {
         printInfo("No init module found - kernel standalone mode");
@@ -196,9 +268,17 @@ export fn _start() callconv(.c) noreturn {
 
 /// Load init process from boot module
 fn loadInitProcess(module: *limine.File) bool {
+    debugPrint("[DEBUG] loadInitProcess: starting");
+
     // Get module data
     const module_addr: u64 = @intFromPtr(module.address);
     const module_size = module.size;
+
+    debugPuts("[DEBUG] Module addr: ");
+    debugHex(module_addr);
+    debugPuts(", size: ");
+    debugDec(module_size);
+    debugPuts("\n");
 
     if (module_size == 0) {
         printFail("Init module is empty");
@@ -209,17 +289,23 @@ fn loadInitProcess(module: *limine.File) bool {
     const module_data: [*]const u8 = @ptrFromInt(module_addr);
     const data_slice = module_data[0..module_size];
 
+    debugPrint("[DEBUG] Checking if valid ELF...");
+
     // Validate ELF
     if (!elf.isElf(data_slice)) {
         printFail("Init module is not a valid ELF");
         return false;
     }
 
+    debugPrint("[DEBUG] Creating process...");
+
     // Create init process
     const init_proc = process.create(null) orelse {
         printFail("Failed to create init process");
         return false;
     };
+
+    debugPrint("[DEBUG] Process created, setting name...");
 
     init_proc.setName("init");
     init_proc.flags.init_process = true;
@@ -230,12 +316,16 @@ fn loadInitProcess(module: *limine.File) bool {
         return false;
     };
 
+    debugPrint("[DEBUG] Loading ELF into address space...");
+
     // Load ELF into address space
     const load_result = elf.load(space, data_slice) catch {
         printFail("Failed to load init ELF");
         process.destroy(init_proc);
         return false;
     };
+
+    debugPrint("[DEBUG] ELF loaded successfully");
 
     // Allocate user stack
     const stack_result = usermode.allocateUserStack(space) catch {
@@ -270,7 +360,14 @@ fn halt() noreturn {
 
 // Panic handler for Zig runtime
 pub fn panic(msg: []const u8, _: ?*@import("std").builtin.StackTrace, _: ?usize) noreturn {
-    // Try to display panic message
+    // Output to serial first (most reliable)
+    serial.println("");
+    serial.println("!!! KERNEL PANIC !!!");
+    serial.puts("Message: ");
+    serial.println(msg);
+    serial.println("");
+
+    // Try to display panic message on framebuffer
     if (framebuffer_request.response != null) {
         framebuffer.puts("KERNEL PANIC: ", 10, 400, 0x00ff0000);
         framebuffer.puts(msg, 130, 400, 0x00ff0000);
