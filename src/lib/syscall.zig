@@ -14,6 +14,7 @@ const pmm = @import("pmm.zig");
 const usermode = @import("usermode.zig");
 const ipc = @import("ipc.zig");
 const pic = @import("pic.zig");
+const serial = @import("serial.zig");
 
 /// Syscall numbers (from DESIGN.md)
 pub const SyscallNumber = enum(u64) {
@@ -44,6 +45,8 @@ pub const SyscallNumber = enum(u64) {
     channel_create = 23, // Create IPC channel (bidirectional)
     process_count = 24, // Get count of active processes
     process_list = 25, // Get list of process info
+    mem_info = 26, // Get memory statistics
+    uptime = 27, // Get system uptime in ticks
     _,
 };
 
@@ -181,6 +184,8 @@ fn dispatch(num: u64, args: [6]u64) i64 {
         .channel_create => sysChannelCreate(args),
         .process_count => sysProcessCount(args),
         .process_list => sysProcessList(args),
+        .mem_info => sysMemInfo(args),
+        .uptime => sysUptime(args),
         _ => @intFromEnum(SyscallError.invalid_syscall),
     };
 }
@@ -777,6 +782,9 @@ fn sysDebugPrint(args: [6]u64) i64 {
     const str: [*]const u8 = @ptrFromInt(str_ptr);
     const slice = str[0..@min(str_len, 256)];
 
+    // Also print to serial console
+    serial.puts(slice);
+
     // Print to framebuffer - continue from current position
     for (slice) |c| {
         if (c == '\n') {
@@ -1155,6 +1163,46 @@ fn sysChannelCreate(args: [6]u64) i64 {
     return @intFromEnum(SyscallError.success);
 }
 
+/// Memory info structure returned by mem_info syscall
+pub const MemInfoResult = extern struct {
+    total_bytes: u64,
+    free_bytes: u64,
+    used_bytes: u64,
+};
+
+fn sysMemInfo(args: [6]u64) i64 {
+    // mem_info(result_ptr) - get memory statistics
+    // Returns memory info via pointer
+    const result_ptr = args[0];
+
+    // Validate user pointer
+    if (!usermode.isUserAddress(result_ptr)) {
+        return @intFromEnum(SyscallError.invalid_argument);
+    }
+
+    // Get memory stats from PMM
+    const total = pmm.getTotalMemory();
+    const free = pmm.getFreeMemory();
+    const used = total - free;
+
+    // Write to user space
+    const user_result: *MemInfoResult = @ptrFromInt(result_ptr);
+    user_result.total_bytes = total;
+    user_result.free_bytes = free;
+    user_result.used_bytes = used;
+
+    return @intFromEnum(SyscallError.success);
+}
+
+fn sysUptime(args: [6]u64) i64 {
+    // uptime() - get system uptime in scheduler ticks
+    // Returns tick count directly
+    _ = args;
+
+    const ticks = scheduler.getTicks();
+    return @as(i64, @intCast(ticks));
+}
+
 /// Check if syscall is initialized
 pub fn isInitialized() bool {
     return syscall_initialized;
@@ -1190,6 +1238,8 @@ pub fn getName(num: u64) []const u8 {
         .channel_create => "channel_create",
         .process_count => "process_count",
         .process_list => "process_list",
+        .mem_info => "mem_info",
+        .uptime => "uptime",
         _ => "unknown",
     };
 }
