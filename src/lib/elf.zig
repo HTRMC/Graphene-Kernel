@@ -1,8 +1,38 @@
 // Graphene Kernel - ELF64 Loader
 // Parses and loads ELF64 executables with W^X enforcement
 
+const std = @import("std");
+const builtin = @import("builtin");
 const vmm = @import("vmm.zig");
 const pmm = @import("pmm.zig");
+const serial = @import("serial.zig");
+
+/// Debug logging - only enabled in Debug builds
+const debug_enabled = builtin.mode == .Debug;
+
+fn debugPrint(comptime fmt: []const u8) void {
+    if (debug_enabled) {
+        serial.println(fmt);
+    }
+}
+
+fn debugPuts(str: []const u8) void {
+    if (debug_enabled) {
+        serial.puts(str);
+    }
+}
+
+fn debugHex(value: u64) void {
+    if (debug_enabled) {
+        serial.putHex(value);
+    }
+}
+
+fn debugDec(value: u64) void {
+    if (debug_enabled) {
+        serial.putDec(value);
+    }
+}
 
 /// ELF magic number
 const ELF_MAGIC = [4]u8{ 0x7F, 'E', 'L', 'F' };
@@ -208,6 +238,12 @@ fn loadSegment(space: *vmm.AddressSpace, data: []const u8, ph: *const Elf64Progr
     const vaddr_end = (ph.p_vaddr + ph.p_memsz + 0xFFF) & ~@as(u64, 0xFFF); // Page-align up
     const num_pages = (vaddr_end - vaddr_start) / 0x1000;
 
+    debugPuts("[ELF] Loading segment at vaddr ");
+    debugHex(vaddr_start);
+    debugPuts(", ");
+    debugDec(num_pages);
+    debugPuts(" pages\n");
+
     // Convert ELF flags to VMM flags
     var flags = vmm.MapFlags{
         .user = true,
@@ -223,21 +259,35 @@ fn loadSegment(space: *vmm.AddressSpace, data: []const u8, ph: *const Elf64Progr
         // Allocate physical frame
         const frame = pmm.allocFrame() orelse return ElfError.OutOfMemory;
 
+        debugPuts("[ELF] Page ");
+        debugDec(page);
+        debugPuts(": vaddr=");
+        debugHex(vaddr);
+        debugPuts(" frame=");
+        debugHex(frame);
+        debugPuts("\n");
+
         // Map with write permission initially (for copying data)
         var temp_flags = flags;
         temp_flags.writable = true;
 
+        debugPrint("[ELF] Mapping page...");
         space.mapPage(vaddr, frame, temp_flags) catch {
             pmm.freeFrame(frame);
             return ElfError.LoadFailed;
         };
+        debugPrint("[ELF] Page mapped, zeroing...");
 
         // Zero the page first
         const page_ptr = pmm.physToVirt(frame);
+        debugPuts("[ELF] Zero via HHDM addr: ");
+        debugHex(page_ptr);
+        debugPuts("\n");
         const page_slice: [*]u8 = @ptrFromInt(page_ptr);
         for (0..0x1000) |i| {
             page_slice[i] = 0;
         }
+        debugPrint("[ELF] Page zeroed, copying data...");
 
         // Copy file data if this page contains it
         const page_start = vaddr;
@@ -255,12 +305,20 @@ fn loadSegment(space: *vmm.AddressSpace, data: []const u8, ph: *const Elf64Progr
             const page_offset = copy_start - page_start;
             const file_offset = ph.p_offset + (copy_start - ph.p_vaddr);
 
+            debugPuts("[ELF] Copying ");
+            debugDec(copy_len);
+            debugPuts(" bytes from offset ");
+            debugDec(file_offset);
+            debugPuts("\n");
+
             // Copy data
             const src = data[file_offset..][0..copy_len];
             for (0..copy_len) |i| {
                 page_slice[page_offset + i] = src[i];
             }
+            debugPrint("[ELF] Copy done");
         }
+        debugPrint("[ELF] Page complete");
     }
 
     // Remap with correct permissions if needed (remove write for RX segments)
