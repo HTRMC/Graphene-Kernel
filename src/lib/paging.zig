@@ -119,16 +119,17 @@ pub fn writeCr3(pml4_phys: u64) void {
     asm volatile ("mov %[pml4], %%cr3"
         :
         : [pml4] "r" (pml4_phys),
-        : "memory"
+        : .{ .memory = true }
     );
 }
 
 /// Invalidate TLB entry for address
 pub fn invlpg(vaddr: u64) void {
-    asm volatile ("invlpg (%[addr])"
+    // Use register-indirect addressing to avoid dereferencing the address
+    asm volatile ("invlpg (%%rax)"
         :
-        : [addr] "r" (vaddr),
-        : "memory"
+        : [addr] "{rax}" (vaddr),
+        : .{ .memory = true }
     );
 }
 
