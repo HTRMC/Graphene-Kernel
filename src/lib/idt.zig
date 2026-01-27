@@ -11,6 +11,7 @@ const syscall = @import("syscall.zig");
 const vmm = @import("vmm.zig");
 const object = @import("object.zig");
 const serial = @import("serial.zig");
+const usermode = @import("usermode.zig");
 
 /// Number of IDT entries (256 possible interrupt vectors)
 const IDT_ENTRIES = 256;
@@ -349,7 +350,12 @@ fn handleException(frame: *InterruptFrame) void {
 
         // If in user mode, terminate the process instead of panicking
         if (in_user_mode) {
-            handleUserException(frame, "PAGE FAULT", cr2);
+            // Check if this is a stack overflow (fault in guard page region)
+            if (cr2 >= usermode.GUARD_PAGE_ADDR and cr2 < usermode.USER_STACK_BOTTOM) {
+                handleUserException(frame, "STACK OVERFLOW", cr2);
+            } else {
+                handleUserException(frame, "PAGE FAULT", cr2);
+            }
             return;
         }
 
