@@ -16,13 +16,17 @@ pub fn build(b: *std.Build) void {
     kernel_query.cpu_features_sub = Target.featureSet(&.{ .avx, .avx2, .sse, .sse2, .mmx });
 
     const kernel_target = b.resolveTargetQuery(kernel_query);
-    const optimize = b.standardOptimizeOption(.{});
+    // Note: Using hardcoded ReleaseSafe to avoid ubsan SSE issues with freestanding target
+    _ = b.standardOptimizeOption(.{});
 
     // Create root module for kernel
     const kernel_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = kernel_target,
-        .optimize = optimize,
+        // Use ReleaseSafe to avoid ubsan using SSE in Debug mode
+        .optimize = .ReleaseSafe,
+        .strip = true,
+        .unwind_tables = .none,
     });
 
     // Set kernel-specific options (must be set after module creation)
@@ -59,14 +63,16 @@ pub fn build(b: *std.Build) void {
     const syscall_module = b.createModule(.{
         .root_source_file = b.path("user/lib/syscall.zig"),
         .target = user_target,
-        .optimize = optimize,
+        .optimize = .ReleaseSafe,
+        .strip = true,
     });
 
     // Init process module (start.zig is root, calls main from init)
     const init_main_module = b.createModule(.{
         .root_source_file = b.path("user/init/main.zig"),
         .target = user_target,
-        .optimize = optimize,
+        .optimize = .ReleaseSafe,
+        .strip = true,
         .imports = &.{
             .{ .name = "syscall", .module = syscall_module },
         },
@@ -75,7 +81,9 @@ pub fn build(b: *std.Build) void {
     const init_module = b.createModule(.{
         .root_source_file = b.path("user/lib/start.zig"),
         .target = user_target,
-        .optimize = optimize,
+        .optimize = .ReleaseSafe,
+        .strip = true,
+        .unwind_tables = .none,
         .imports = &.{
             .{ .name = "syscall", .module = syscall_module },
             .{ .name = "main", .module = init_main_module },
@@ -102,7 +110,8 @@ pub fn build(b: *std.Build) void {
     const shell_main_module = b.createModule(.{
         .root_source_file = b.path("user/shell/main.zig"),
         .target = user_target,
-        .optimize = optimize,
+        .optimize = .ReleaseSafe,
+        .strip = true,
         .imports = &.{
             .{ .name = "syscall", .module = syscall_module },
         },
@@ -111,7 +120,9 @@ pub fn build(b: *std.Build) void {
     const shell_module = b.createModule(.{
         .root_source_file = b.path("user/lib/start.zig"),
         .target = user_target,
-        .optimize = optimize,
+        .optimize = .ReleaseSafe,
+        .strip = true,
+        .unwind_tables = .none,
         .imports = &.{
             .{ .name = "syscall", .module = syscall_module },
             .{ .name = "main", .module = shell_main_module },
@@ -138,7 +149,8 @@ pub fn build(b: *std.Build) void {
     const kbd_main_module = b.createModule(.{
         .root_source_file = b.path("user/drivers/kbd/main.zig"),
         .target = user_target,
-        .optimize = optimize,
+        .optimize = .ReleaseSafe,
+        .strip = true,
         .imports = &.{
             .{ .name = "syscall", .module = syscall_module },
         },
@@ -147,7 +159,9 @@ pub fn build(b: *std.Build) void {
     const kbd_module = b.createModule(.{
         .root_source_file = b.path("user/lib/start.zig"),
         .target = user_target,
-        .optimize = optimize,
+        .optimize = .ReleaseSafe,
+        .strip = true,
+        .unwind_tables = .none,
         .imports = &.{
             .{ .name = "syscall", .module = syscall_module },
             .{ .name = "main", .module = kbd_main_module },
