@@ -234,6 +234,11 @@ export fn _start() callconv(.c) noreturn {
                 if (loadUserProcess(module, "shell")) {
                     printOk("Loaded: shell");
                 }
+            } else if (strEql(module_name, "ramfs")) {
+                // Load ramfs as a filesystem service
+                if (loadUserProcess(module, "ramfs")) {
+                    printOk("Loaded: ramfs (filesystem service)");
+                }
             } else {
                 // Unknown module - try to load as generic driver
                 printInfo("Skipping unknown module");

@@ -47,6 +47,12 @@ if exist "zig-out\bin\kbd" (
     echo Copied keyboard driver to ISO
 )
 
+:: Copy ramfs service (if it exists)
+if exist "zig-out\bin\ramfs" (
+    copy "zig-out\bin\ramfs" "%ISO_ROOT%\boot\ramfs"
+    echo Copied ramfs service to ISO
+)
+
 :: Copy Limine config
 copy "limine.conf" "%ISO_ROOT%\boot\limine\limine.conf"
 

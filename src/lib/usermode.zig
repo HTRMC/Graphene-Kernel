@@ -3,15 +3,22 @@
 
 const gdt = @import("gdt.zig");
 const vmm = @import("vmm.zig");
+const pmm = @import("pmm.zig");
 
 /// User stack size (64KB)
 pub const USER_STACK_SIZE: u64 = 64 * 1024;
+
+/// Guard page size (one page at bottom of stack to catch overflow)
+pub const GUARD_PAGE_SIZE: u64 = pmm.PAGE_SIZE;
 
 /// Default user stack top (grows down from here)
 pub const USER_STACK_TOP: u64 = 0x7FFFFFF00000;
 
 /// User stack bottom (USER_STACK_TOP - USER_STACK_SIZE)
 pub const USER_STACK_BOTTOM: u64 = USER_STACK_TOP - USER_STACK_SIZE;
+
+/// Guard page location (one page below stack bottom)
+pub const GUARD_PAGE_ADDR: u64 = USER_STACK_BOTTOM - GUARD_PAGE_SIZE;
 
 /// Jump to user mode at the specified entry point with given stack
 /// This function never returns (from kernel perspective)
@@ -177,7 +184,12 @@ const InterruptFrameMinimal = extern struct {
 };
 
 /// Allocate and map a user stack in the given address space
+/// The region below USER_STACK_BOTTOM (GUARD_PAGE_ADDR) is intentionally
+/// left unmapped to serve as a guard page. Any access to this region
+/// will cause a page fault, allowing detection of stack overflow.
 pub fn allocateUserStack(space: *vmm.AddressSpace) !u64 {
+    // Note: The guard page region (GUARD_PAGE_ADDR to USER_STACK_BOTTOM)
+    // is NOT mapped, so any stack overflow will trigger a page fault
     return space.allocateRegion(
         USER_STACK_BOTTOM,
         USER_STACK_SIZE,

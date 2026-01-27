@@ -183,6 +183,45 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(kbd);
 
     // ========================================
+    // User space: ramfs service
+    // ========================================
+    const ramfs_main_module = b.createModule(.{
+        .root_source_file = b.path("user/services/ramfs/main.zig"),
+        .target = user_target,
+        .optimize = .ReleaseSafe,
+        .strip = true,
+        .imports = &.{
+            .{ .name = "syscall", .module = syscall_module },
+        },
+    });
+
+    const ramfs_module = b.createModule(.{
+        .root_source_file = b.path("user/lib/start.zig"),
+        .target = user_target,
+        .optimize = .ReleaseSafe,
+        .strip = true,
+        .unwind_tables = .none,
+        .imports = &.{
+            .{ .name = "syscall", .module = syscall_module },
+            .{ .name = "main", .module = ramfs_main_module },
+        },
+    });
+
+    ramfs_module.red_zone = false;
+
+    // Ramfs service executable
+    const ramfs = b.addExecutable(.{
+        .name = "ramfs",
+        .root_module = ramfs_module,
+    });
+
+    // Use user linker script
+    ramfs.setLinkerScript(b.path("user/linker-user.ld"));
+
+    // Install ramfs binary
+    b.installArtifact(ramfs);
+
+    // ========================================
     // Build ISO step
     // ========================================
     const iso_cmd = b.addSystemCommand(&.{

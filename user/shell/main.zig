@@ -59,6 +59,7 @@ fn cmdHelp() void {
     syscall.print("  help     - Show this help message\n");
     syscall.print("  clear    - Clear the screen\n");
     syscall.print("  info     - Show system information\n");
+    syscall.print("  sysinfo  - Show comprehensive system status\n");
     syscall.print("  echo     - Echo text back\n");
     syscall.print("  yield    - Yield CPU time slice\n");
     syscall.print("  caps     - Show capability types\n");
@@ -333,6 +334,103 @@ fn cmdUptime() void {
     }
 }
 
+fn cmdSysinfo() void {
+    syscall.print("=======================================\n");
+    syscall.print("       GRAPHENE SYSTEM STATUS\n");
+    syscall.print("=======================================\n\n");
+
+    // Kernel info
+    syscall.print("[Kernel]\n");
+    syscall.print("  Name:      Graphene Kernel\n");
+    syscall.print("  Version:   0.1.0\n");
+    syscall.print("  Arch:      x86_64\n");
+    syscall.print("  Type:      Hybrid Microkernel\n");
+    syscall.print("  Security:  Capability-based\n\n");
+
+    // Memory info
+    syscall.print("[Memory]\n");
+    var mem_result: syscall.MemInfoResult = undefined;
+    const mem_status = syscall.memInfo(&mem_result);
+    if (mem_status >= 0) {
+        const total_mb = mem_result.total_bytes / (1024 * 1024);
+        const free_mb = mem_result.free_bytes / (1024 * 1024);
+        const used_mb = mem_result.used_bytes / (1024 * 1024);
+        const usage_percent = if (mem_result.total_bytes > 0)
+            (mem_result.used_bytes * 100) / mem_result.total_bytes
+        else
+            0;
+
+        syscall.print("  Total:     ");
+        printNum64(total_mb);
+        syscall.print(" MB\n");
+        syscall.print("  Used:      ");
+        printNum64(used_mb);
+        syscall.print(" MB (");
+        printNum64(usage_percent);
+        syscall.print("%)\n");
+        syscall.print("  Free:      ");
+        printNum64(free_mb);
+        syscall.print(" MB\n\n");
+    } else {
+        syscall.print("  (unavailable)\n\n");
+    }
+
+    // Uptime
+    syscall.print("[Uptime]\n");
+    const ticks = syscall.uptime();
+    if (ticks >= 0) {
+        const ticks_u: u64 = @intCast(ticks);
+        const seconds = ticks_u / 100;
+        const minutes = seconds / 60;
+        const hours = minutes / 60;
+
+        syscall.print("  Time:      ");
+        if (hours > 0) {
+            printNum64(hours);
+            syscall.print("h ");
+            printNum64(minutes % 60);
+            syscall.print("m ");
+        } else if (minutes > 0) {
+            printNum64(minutes);
+            syscall.print("m ");
+        }
+        printNum64(seconds % 60);
+        syscall.print("s\n");
+        syscall.print("  Ticks:     ");
+        printNum64(ticks_u);
+        syscall.print("\n\n");
+    } else {
+        syscall.print("  (unavailable)\n\n");
+    }
+
+    // Process info
+    syscall.print("[Processes]\n");
+    const count_result = syscall.processCount();
+    if (count_result >= 0) {
+        syscall.print("  Running:   ");
+        printNum(@intCast(@as(u64, @bitCast(count_result))));
+        syscall.print(" processes\n");
+
+        // List process names
+        var entries: [16]syscall.ProcessInfoEntry = undefined;
+        const max_entries: usize = @min(@as(usize, @intCast(@as(u64, @bitCast(count_result)))), 16);
+        const list_result = syscall.processList(&entries, max_entries);
+        if (list_result >= 0) {
+            const actual_count: usize = @intCast(@as(u64, @bitCast(list_result)));
+            syscall.print("  Services:  ");
+            for (0..actual_count) |i| {
+                if (i > 0) syscall.print(", ");
+                printProcessName(&entries[i].name);
+            }
+            syscall.print("\n");
+        }
+    } else {
+        syscall.print("  (unavailable)\n");
+    }
+
+    syscall.print("\n=======================================\n");
+}
+
 /// Print a 64-bit number
 fn printNum64(num: u64) void {
     var buf: [20]u8 = undefined;
@@ -386,6 +484,8 @@ fn executeCommand(cmd: []const u8) void {
         cmdClear();
     } else if (strEql(command, "info")) {
         cmdInfo();
+    } else if (strEql(command, "sysinfo")) {
+        cmdSysinfo();
     } else if (strEql(command, "echo")) {
         cmdEcho(args);
     } else if (strEql(command, "yield")) {
