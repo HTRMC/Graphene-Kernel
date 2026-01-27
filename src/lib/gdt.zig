@@ -205,10 +205,11 @@ pub fn setInterruptStack(ist_index: u3, stack: u64) void {
 }
 
 fn loadGdt() void {
-    // Load GDT
-    asm volatile ("lgdt (%[gdt_ptr])"
+    // Load GDT - use lgdtq for 64-bit explicit size
+    asm volatile (
+        \\lgdtq 0(%%rax)
         :
-        : [gdt_ptr] "r" (&gdt_pointer),
+        : [gdt_ptr] "{rax}" (&gdt_pointer),
     );
 
     // Reload code segment by far return
