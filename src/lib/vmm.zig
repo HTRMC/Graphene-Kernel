@@ -464,6 +464,45 @@ pub fn isInitialized() bool {
     return initialized;
 }
 
+/// Map MMIO (Memory-Mapped I/O) region into kernel space
+/// Uses cache-disabled, write-through flags appropriate for device memory
+/// Returns the virtual address of the mapping
+pub fn mapMmio(phys_addr: u64, size: u64) VmmError!u64 {
+    const aligned_phys = phys_addr & ~@as(u64, pmm.PAGE_SIZE - 1);
+    const aligned_size = ((size + pmm.PAGE_SIZE - 1) / pmm.PAGE_SIZE) * pmm.PAGE_SIZE;
+    const num_pages = aligned_size / pmm.PAGE_SIZE;
+
+    // Calculate the HHDM virtual address for this physical address
+    const virt_addr = pmm.physToVirt(aligned_phys);
+
+    // MMIO page flags: present, writable, no caching, no execute
+    const mmio_flags = paging.PageFlags{
+        .present = true,
+        .writable = true,
+        .user_accessible = false,
+        .write_through = true,
+        .cache_disabled = true,
+        .no_execute = true,
+    };
+
+    // Map each page
+    var current_phys = aligned_phys;
+    var current_virt = virt_addr;
+    var mapped: usize = 0;
+
+    while (mapped < num_pages) : ({
+        current_phys += pmm.PAGE_SIZE;
+        current_virt += pmm.PAGE_SIZE;
+        mapped += 1;
+    }) {
+        paging.mapPageForce(kernel_pml4, current_virt, current_phys, mmio_flags) catch {
+            return VmmError.OutOfMemory;
+        };
+    }
+
+    return virt_addr;
+}
+
 // Simple AddressSpace struct pool for Phase 1
 const MAX_ADDRESS_SPACES: usize = 64;
 var address_space_pool: [MAX_ADDRESS_SPACES]AddressSpace = undefined;
