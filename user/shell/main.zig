@@ -64,6 +64,8 @@ fn cmdHelp() void {
     syscall.print("  caps     - Show capability types\n");
     syscall.print("  ipc-test - Test IPC functionality\n");
     syscall.print("  ps       - List running processes\n");
+    syscall.print("  mem      - Show memory statistics\n");
+    syscall.print("  uptime   - Show system uptime\n");
 }
 
 fn cmdClear() void {
@@ -241,6 +243,115 @@ fn printSignedNum(num: i64) void {
     }
 }
 
+fn cmdMem() void {
+    syscall.print("Memory Statistics:\n");
+    syscall.print("------------------\n");
+
+    var mem_result: syscall.MemInfoResult = undefined;
+    const result = syscall.memInfo(&mem_result);
+
+    if (result < 0) {
+        syscall.print("Error getting memory info\n");
+        return;
+    }
+
+    // Convert to KB and MB for readability
+    const total_kb = mem_result.total_bytes / 1024;
+    const free_kb = mem_result.free_bytes / 1024;
+    const used_kb = mem_result.used_bytes / 1024;
+
+    const total_mb = total_kb / 1024;
+    const free_mb = free_kb / 1024;
+    const used_mb = used_kb / 1024;
+
+    syscall.print("Total:  ");
+    printNum64(total_mb);
+    syscall.print(" MB (");
+    printNum64(total_kb);
+    syscall.print(" KB)\n");
+
+    syscall.print("Used:   ");
+    printNum64(used_mb);
+    syscall.print(" MB (");
+    printNum64(used_kb);
+    syscall.print(" KB)\n");
+
+    syscall.print("Free:   ");
+    printNum64(free_mb);
+    syscall.print(" MB (");
+    printNum64(free_kb);
+    syscall.print(" KB)\n");
+
+    // Calculate percentage
+    if (mem_result.total_bytes > 0) {
+        const used_percent = (mem_result.used_bytes * 100) / mem_result.total_bytes;
+        syscall.print("Usage:  ");
+        printNum64(used_percent);
+        syscall.print("%\n");
+    }
+}
+
+fn cmdUptime() void {
+    const ticks = syscall.uptime();
+
+    if (ticks < 0) {
+        syscall.print("Error getting uptime\n");
+        return;
+    }
+
+    // Convert ticks to seconds (assuming 100 Hz timer = 100 ticks/sec)
+    const ticks_u: u64 = @intCast(ticks);
+    const seconds = ticks_u / 100;
+    const minutes = seconds / 60;
+    const hours = minutes / 60;
+
+    syscall.print("System Uptime:\n");
+    syscall.print("--------------\n");
+
+    syscall.print("Ticks:   ");
+    printNum64(ticks_u);
+    syscall.print("\n");
+
+    if (hours > 0) {
+        syscall.print("Time:    ");
+        printNum64(hours);
+        syscall.print("h ");
+        printNum64(minutes % 60);
+        syscall.print("m ");
+        printNum64(seconds % 60);
+        syscall.print("s\n");
+    } else if (minutes > 0) {
+        syscall.print("Time:    ");
+        printNum64(minutes);
+        syscall.print("m ");
+        printNum64(seconds % 60);
+        syscall.print("s\n");
+    } else {
+        syscall.print("Time:    ");
+        printNum64(seconds);
+        syscall.print("s\n");
+    }
+}
+
+/// Print a 64-bit number
+fn printNum64(num: u64) void {
+    var buf: [20]u8 = undefined;
+    var n = num;
+    var len: usize = 0;
+
+    if (n == 0) {
+        syscall.print("0");
+        return;
+    }
+
+    while (n > 0 and len < buf.len) : (len += 1) {
+        buf[buf.len - 1 - len] = @truncate((n % 10) + '0');
+        n /= 10;
+    }
+
+    _ = syscall.debugPrint(buf[buf.len - len ..]);
+}
+
 fn cmdUnknown(cmd: []const u8) void {
     syscall.print("Unknown command: ");
     _ = syscall.debugPrint(cmd);
@@ -285,6 +396,10 @@ fn executeCommand(cmd: []const u8) void {
         cmdIpcTest();
     } else if (strEql(command, "ps")) {
         cmdPs();
+    } else if (strEql(command, "mem")) {
+        cmdMem();
+    } else if (strEql(command, "uptime")) {
+        cmdUptime();
     } else {
         cmdUnknown(command);
     }
