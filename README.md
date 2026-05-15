@@ -50,29 +50,6 @@ Clone the repository and run:
 .\run.bat iso
 ```
 
-## Project Structure
-
-```
-graphene-kernel/
-├── build.zig           # Zig build configuration
-├── build.zig.zon       # Package manifest
-├── linker.ld           # Kernel linker script
-├── limine.conf         # Bootloader configuration
-├── run.bat             # Build/run script (downloads Zig)
-├── .zigversion         # Zig version to use
-├── src/
-│   ├── main.zig        # Kernel entry point
-│   └── lib/
-│       ├── limine.zig      # Limine bootloader bindings
-│       ├── framebuffer.zig # Framebuffer driver
-│       ├── font.zig        # 8x8 bitmap font
-│       ├── gdt.zig         # Global Descriptor Table + TSS
-│       ├── idt.zig         # Interrupt Descriptor Table
-│       └── pic.zig         # 8259 PIC driver
-└── scripts/
-    └── build-iso.bat   # ISO creation script
-```
-
 ## Architecture
 
 - **Target**: x86_64 freestanding
