@@ -2,6 +2,25 @@
 // Hybrid Microkernel with Capability-Based Security
 
 const builtin = @import("builtin");
+
+fn refAllRecursive(comptime T: type) void {
+    switch (@typeInfo(T)) {
+        .@"struct", .@"enum", .@"union", .@"opaque" => {},
+        else => return,
+    }
+    inline for (comptime std.meta.declarations(T)) |decl| {
+        if (@TypeOf(@field(T, decl.name)) == type) {
+            refAllRecursive(@field(T, decl.name));
+        }
+        _ = &@field(T, decl.name);
+    }
+}
+
+comptime {
+    refAllRecursive(@This());
+}
+
+const std = @import("std");
 const limine = @import("lib/limine.zig");
 const framebuffer = @import("lib/framebuffer.zig");
 const gdt = @import("lib/gdt.zig");
