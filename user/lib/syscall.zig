@@ -62,8 +62,7 @@ inline fn syscall0(num: u64) i64 {
     return asm volatile ("int $0x80"
         : [ret] "={rax}" (-> i64),
         : [num] "{rax}" (num),
-        : "memory"
-    );
+        : .{ .memory = true });
 }
 
 inline fn syscall1(num: u64, a1: u64) i64 {
@@ -71,8 +70,7 @@ inline fn syscall1(num: u64, a1: u64) i64 {
         : [ret] "={rax}" (-> i64),
         : [num] "{rax}" (num),
           [a1] "{rdi}" (a1),
-        : "memory"
-    );
+        : .{ .memory = true });
 }
 
 inline fn syscall2(num: u64, a1: u64, a2: u64) i64 {
@@ -81,8 +79,7 @@ inline fn syscall2(num: u64, a1: u64, a2: u64) i64 {
         : [num] "{rax}" (num),
           [a1] "{rdi}" (a1),
           [a2] "{rsi}" (a2),
-        : "memory"
-    );
+        : .{ .memory = true });
 }
 
 inline fn syscall3(num: u64, a1: u64, a2: u64, a3: u64) i64 {
@@ -92,8 +89,7 @@ inline fn syscall3(num: u64, a1: u64, a2: u64, a3: u64) i64 {
           [a1] "{rdi}" (a1),
           [a2] "{rsi}" (a2),
           [a3] "{rdx}" (a3),
-        : "memory"
-    );
+        : .{ .memory = true });
 }
 
 inline fn syscall4(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) i64 {
@@ -104,8 +100,7 @@ inline fn syscall4(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) i64 {
           [a2] "{rsi}" (a2),
           [a3] "{rdx}" (a3),
           [a4] "{r10}" (a4),
-        : "memory"
-    );
+        : .{ .memory = true });
 }
 
 inline fn syscall5(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) i64 {
@@ -117,8 +112,7 @@ inline fn syscall5(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) i64 {
           [a3] "{rdx}" (a3),
           [a4] "{r10}" (a4),
           [a5] "{r8}" (a5),
-        : "memory"
-    );
+        : .{ .memory = true });
 }
 
 // ============================================================================

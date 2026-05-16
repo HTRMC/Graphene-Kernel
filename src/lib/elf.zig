@@ -245,7 +245,7 @@ fn loadSegment(space: *vmm.AddressSpace, data: []const u8, ph: *const Elf64Progr
     debugPuts(" pages\n");
 
     // Convert ELF flags to VMM flags
-    var flags = vmm.MapFlags{
+    const flags = vmm.MapFlags{
         .user = true,
         .writable = (ph.p_flags & PF_W) != 0,
         .executable = (ph.p_flags & PF_X) != 0,
