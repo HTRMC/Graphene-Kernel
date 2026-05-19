@@ -235,6 +235,7 @@ export fn _start() callconv(.c) noreturn {
     var ramfs_proc: ?*process.Process = null;
     var shell_proc: ?*process.Process = null;
     var logger_proc: ?*process.Process = null;
+    var devfs_proc: ?*process.Process = null;
     if (module_request.response) |mod_response| {
         const modules = mod_response.getModules();
         printInfo("Loading boot modules..."); // TODO: make sure this text doesnt overlap. the text Running in user mode!
@@ -265,6 +266,10 @@ export fn _start() callconv(.c) noreturn {
                 // Load logger as a text-logging service
                 logger_proc = loadUserProcessP(module, "logger");
                 if (logger_proc != null) printOk("Loaded: logger (text-logging service)");
+            } else if (strEql(module_name, "devfs")) {
+                // Load devfs as a device filesystem service
+                devfs_proc = loadUserProcessP(module, "devfs");
+                if (devfs_proc != null) printOk("Loaded: devfs (device filesystem)");
             } else {
                 // Unknown module - try to load as generic driver
                 printInfo("Skipping unknown module");
@@ -287,6 +292,15 @@ export fn _start() callconv(.c) noreturn {
             printOk("LOG endpoint wired (slot 2)");
         } else {
             printFail("LOG endpoint wire failed");
+        }
+    }
+
+    // Wire DEVFS endpoint: devfs gets HANDLE, shell gets SEND, at DEVFS_CAP_SLOT.
+    if (devfs_proc != null and shell_proc != null) {
+        if (wireServiceEndpoint(devfs_proc.?, shell_proc.?, DEVFS_CAP_SLOT)) {
+            printOk("DEVFS endpoint wired (slot 3)");
+        } else {
+            printFail("DEVFS endpoint wire failed");
         }
     }
 
@@ -447,6 +461,7 @@ fn strEql(a: []const u8, b: []const u8) bool {
 /// Must match the constants in user/lib/vfs.zig and user/lib/log.zig.
 const VFS_CAP_SLOT: u32 = 1;
 const LOG_CAP_SLOT: u32 = 2;
+const DEVFS_CAP_SLOT: u32 = 3;
 
 /// Create a VFS endpoint and inject the cap into ramfs (HANDLE) and shell (SEND).
 fn wireVfsEndpoint(ramfs: *process.Process, shell: *process.Process) bool {

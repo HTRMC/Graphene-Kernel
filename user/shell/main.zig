@@ -33,6 +33,18 @@ fn startsWith(str: []const u8, prefix: []const u8) bool {
     return true;
 }
 
+const DEV_PREFIX = "/dev/";
+const DEV_ROOT = "/dev";
+
+/// Route a path to (capability slot, server-relative name).
+/// `/dev/foo` -> (devfs, "foo"); everything else -> (ramfs, path as-is).
+fn routePath(path: []const u8) struct { slot: u32, name: []const u8 } {
+    if (startsWith(path, DEV_PREFIX)) {
+        return .{ .slot = vfs.DEVFS_CAP_SLOT, .name = path[DEV_PREFIX.len..] };
+    }
+    return .{ .slot = vfs.VFS_CAP_SLOT, .name = path };
+}
+
 /// Print a number
 fn printNum(num: u32) void {
     var buf: [16]u8 = undefined;
@@ -69,12 +81,13 @@ fn cmdHelp() void {
     syscall.print("  ps       - List running processes\n");
     syscall.print("  mem      - Show memory statistics\n");
     syscall.print("  uptime   - Show system uptime\n");
-    syscall.print("  ls       - List files (ramfs)\n");
+    syscall.print("  ls       - List files (ls [/dev])\n");
     syscall.print("  cat      - Print file contents\n");
     syscall.print("  stat     - Show file metadata\n");
     syscall.print("  touch    - Create empty file\n");
     syscall.print("  write    - Write text to file\n");
     syscall.print("  rm       - Delete file\n");
+    syscall.print("  mount    - List active filesystems\n");
 }
 
 // ============================================================================
@@ -96,9 +109,20 @@ fn printFsError(err: vfs.FsError) void {
     }
 }
 
-fn cmdLs() void {
+fn cmdLs(args: []const u8) void {
+    // Default to ramfs root; `/dev` or `/dev/` routes to devfs root.
+    var slot: u32 = vfs.VFS_CAP_SLOT;
+    if (args.len > 0) {
+        if (strEql(args, DEV_ROOT) or strEql(args, DEV_PREFIX)) {
+            slot = vfs.DEVFS_CAP_SLOT;
+        } else if (startsWith(args, DEV_PREFIX)) {
+            // Subdirs of /dev not supported (flat devfs).
+            slot = vfs.DEVFS_CAP_SLOT;
+        }
+    }
+
     var reply_buf: [vfs.MAX_MSG_DATA]u8 = undefined;
-    const result = vfs.call(.readdir, "", 0, 0, &.{}, &reply_buf);
+    const result = vfs.callSlot(slot, .readdir, "", 0, 0, &.{}, &reply_buf);
     const count = vfs.readdirCount(&reply_buf);
     if (count < 0) {
         syscall.print("ls: ");
@@ -126,11 +150,14 @@ fn cmdCat(args: []const u8) void {
         syscall.print("usage: cat <file>\n");
         return;
     }
+    const route = routePath(args);
     var reply_buf: [vfs.MAX_MSG_DATA]u8 = undefined;
     var offset: u32 = 0;
-    while (true) {
+    // Cap total bytes to avoid runaway reads from infinite sources like /dev/zero.
+    const MAX_TOTAL: u32 = 4096;
+    while (offset < MAX_TOTAL) {
         const max_chunk: u32 = @intCast(reply_buf.len - @sizeOf(vfs.ResponseHeader));
-        const result = vfs.call(.read, args, offset, max_chunk, &.{}, &reply_buf);
+        const result = vfs.callSlot(route.slot, .read, route.name, offset, max_chunk, &.{}, &reply_buf);
         if (result.err != .success) {
             syscall.print("cat: ");
             printFsError(result.err);
@@ -149,8 +176,9 @@ fn cmdStat(args: []const u8) void {
         syscall.print("usage: stat <file>\n");
         return;
     }
+    const route = routePath(args);
     var reply_buf: [vfs.MAX_MSG_DATA]u8 = undefined;
-    const result = vfs.call(.stat, args, 0, 0, &.{}, &reply_buf);
+    const result = vfs.callSlot(route.slot, .stat, route.name, 0, 0, &.{}, &reply_buf);
     if (result.err != .success) {
         syscall.print("stat: ");
         printFsError(result.err);
@@ -178,8 +206,9 @@ fn cmdTouch(args: []const u8) void {
         syscall.print("usage: touch <file>\n");
         return;
     }
+    const route = routePath(args);
     var reply_buf: [vfs.MAX_MSG_DATA]u8 = undefined;
-    const result = vfs.call(.create, args, 0, 0, &.{}, &reply_buf);
+    const result = vfs.callSlot(route.slot, .create, route.name, 0, 0, &.{}, &reply_buf);
     if (result.err != .success) {
         syscall.print("touch: ");
         printFsError(result.err);
@@ -195,14 +224,18 @@ fn cmdWrite(args: []const u8) void {
         syscall.print("usage: write <file> <text>\n");
         return;
     }
-    const name = args[0..i];
+    const path = args[0..i];
     while (i < args.len and args[i] == ' ') : (i += 1) {}
     const text = args[i..];
 
+    const route = routePath(path);
     var reply_buf: [vfs.MAX_MSG_DATA]u8 = undefined;
-    // Ensure file exists (ignore exists error)
-    _ = vfs.call(.create, name, 0, 0, &.{}, &reply_buf);
-    const result = vfs.call(.write, name, 0, 0, text, &reply_buf);
+    // Ensure file exists on writable filesystems (ramfs). Skip for devfs
+    // since its namespace is read-only and create would return .permission.
+    if (route.slot == vfs.VFS_CAP_SLOT) {
+        _ = vfs.callSlot(route.slot, .create, route.name, 0, 0, &.{}, &reply_buf);
+    }
+    const result = vfs.callSlot(route.slot, .write, route.name, 0, 0, text, &reply_buf);
     if (result.err != .success) {
         syscall.print("write: ");
         printFsError(result.err);
@@ -226,13 +259,28 @@ fn cmdRm(args: []const u8) void {
         syscall.print("usage: rm <file>\n");
         return;
     }
+    const route = routePath(args);
     var reply_buf: [vfs.MAX_MSG_DATA]u8 = undefined;
-    const result = vfs.call(.delete, args, 0, 0, &.{}, &reply_buf);
+    const result = vfs.callSlot(route.slot, .delete, route.name, 0, 0, &.{}, &reply_buf);
     if (result.err != .success) {
         syscall.print("rm: ");
         printFsError(result.err);
         syscall.print("\n");
     }
+}
+
+fn cmdMount() void {
+    syscall.print("FILESYSTEM   SLOT  MOUNT     SERVER\n");
+    syscall.print("-----------  ----  --------  --------\n");
+    // Probe each known filesystem with a ping; report status.
+    var reply_buf: [vfs.MAX_MSG_DATA]u8 = undefined;
+    const ramfs_res = vfs.callSlot(vfs.VFS_CAP_SLOT, .ping, "", 0, 0, &.{}, &reply_buf);
+    syscall.print("ramfs        1     /         ");
+    if (ramfs_res.err == .success) syscall.print("ok\n") else syscall.print("unavailable\n");
+
+    const devfs_res = vfs.callSlot(vfs.DEVFS_CAP_SLOT, .ping, "", 0, 0, &.{}, &reply_buf);
+    syscall.print("devfs        3     /dev      ");
+    if (devfs_res.err == .success) syscall.print("ok\n") else syscall.print("unavailable\n");
 }
 
 fn cmdClear() void {
@@ -667,7 +715,9 @@ fn executeCommand(cmd: []const u8) void {
     } else if (strEql(command, "uptime")) {
         cmdUptime();
     } else if (strEql(command, "ls")) {
-        cmdLs();
+        cmdLs(args);
+    } else if (strEql(command, "mount")) {
+        cmdMount();
     } else if (strEql(command, "cat")) {
         cmdCat(args);
     } else if (strEql(command, "stat")) {

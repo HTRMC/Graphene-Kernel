@@ -7,6 +7,9 @@ const syscall = @import("syscall");
 /// Server (ramfs) gets HANDLE rights; clients (shell, etc.) get SEND rights.
 pub const VFS_CAP_SLOT: u32 = 1;
 
+/// Well-known capability slot for the device filesystem (devfs) endpoint.
+pub const DEVFS_CAP_SLOT: u32 = 3;
+
 /// Maximum filename length on the wire
 pub const MAX_NAME_LEN: usize = 64;
 
@@ -118,8 +121,9 @@ pub const CallResult = struct {
     payload: []const u8,
 };
 
-/// Send a VFS request and wait for reply. Uses VFS_CAP_SLOT.
-pub fn call(
+/// Send a VFS request to a specific capability slot and wait for reply.
+pub fn callSlot(
+    slot: u32,
     op: FsOp,
     name: []const u8,
     offset: u32,
@@ -133,7 +137,7 @@ pub fn call(
         return .{ .err = .invalid_arg, .payload = &.{} };
     }
 
-    const ret = syscall.capCall(VFS_CAP_SLOT, req_buf[0..req_len], reply_buf);
+    const ret = syscall.capCall(slot, req_buf[0..req_len], reply_buf);
     if (ret < 0) {
         return .{ .err = .io_error, .payload = &.{} };
     }
@@ -155,6 +159,18 @@ pub fn call(
 
     const err: FsError = @enumFromInt(hdr.error_code);
     return .{ .err = err, .payload = payload };
+}
+
+/// Backwards-compatible wrapper that targets VFS_CAP_SLOT (ramfs).
+pub fn call(
+    op: FsOp,
+    name: []const u8,
+    offset: u32,
+    size: u32,
+    data: []const u8,
+    reply_buf: []u8,
+) CallResult {
+    return callSlot(VFS_CAP_SLOT, op, name, offset, size, data, reply_buf);
 }
 
 /// Get readdir entry count from a readdir reply

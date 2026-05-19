@@ -59,6 +59,12 @@ if exist "zig-out\bin\logger" (
     echo Copied logger service to ISO
 )
 
+:: Copy devfs service (if it exists)
+if exist "zig-out\bin\devfs" (
+    copy "zig-out\bin\devfs" "%ISO_ROOT%\boot\devfs"
+    echo Copied devfs service to ISO
+)
+
 :: Copy Limine config
 copy "limine.conf" "%ISO_ROOT%\boot\limine\limine.conf"
 

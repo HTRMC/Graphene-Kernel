@@ -284,6 +284,43 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(logger);
 
     // ========================================
+    // User space: devfs service
+    // ========================================
+    const devfs_main_module = b.createModule(.{
+        .root_source_file = b.path("user/services/devfs/main.zig"),
+        .target = user_target,
+        .optimize = .ReleaseSafe,
+        .strip = true,
+        .imports = &.{
+            .{ .name = "syscall", .module = syscall_module },
+            .{ .name = "vfs", .module = vfs_module },
+        },
+    });
+
+    const devfs_module = b.createModule(.{
+        .root_source_file = b.path("user/lib/start.zig"),
+        .target = user_target,
+        .optimize = .ReleaseSafe,
+        .strip = true,
+        .unwind_tables = .none,
+        .imports = &.{
+            .{ .name = "syscall", .module = syscall_module },
+            .{ .name = "main", .module = devfs_main_module },
+        },
+    });
+
+    devfs_module.red_zone = false;
+
+    const devfs = b.addExecutable(.{
+        .name = "devfs",
+        .root_module = devfs_module,
+    });
+
+    devfs.setLinkerScript(b.path("user/linker-user.ld"));
+
+    b.installArtifact(devfs);
+
+    // ========================================
     // Build ISO step
     // ========================================
     const iso_cmd = b.addSystemCommand(&.{
