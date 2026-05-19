@@ -2,6 +2,7 @@
 // Per-process capability tables for object access control
 
 const object = @import("object.zig");
+const pool = @import("pool.zig");
 
 /// Maximum capabilities per process
 pub const MAX_CAPS: u32 = 1024;
@@ -346,8 +347,10 @@ pub fn revoke(table: *CapTable, slot: CapSlot) void {
 /// drop its refcount. Used by `revoke` and by `destroyObject`-style
 /// teardown paths.
 pub fn revokeAllReferencesTo(obj: *object.Object) void {
-    for (&cap_table_pool, cap_table_used) |*tbl, used| {
-        if (!used) continue;
+    var t: u32 = 0;
+    while (t < CapTablePool.CAPACITY) : (t += 1) {
+        if (!cap_table_pool.isUsed(t)) continue;
+        const tbl = cap_table_pool.at(t);
         var i: CapSlot = 0;
         while (i < MAX_CAPS) : (i += 1) {
             if (!tbl.isSlotUsed(i)) continue;
@@ -395,31 +398,20 @@ pub fn countUsed(table: *const CapTable) u32 {
     return table.used_count;
 }
 
-// Simple pool for capability tables (Phase 1)
+/// Capability tables live in a generic O(1) free-list pool.
 const MAX_CAP_TABLES: usize = 64;
-var cap_table_pool: [MAX_CAP_TABLES]CapTable = undefined;
-var cap_table_used: [MAX_CAP_TABLES]bool = [_]bool{false} ** MAX_CAP_TABLES;
+const CapTablePool = pool.Pool(CapTable, MAX_CAP_TABLES);
+var cap_table_pool: CapTablePool = .{};
 
 /// Allocate a new capability table
 pub fn createTable() ?*CapTable {
-    for (&cap_table_used, 0..) |*used, i| {
-        if (!used.*) {
-            used.* = true;
-            cap_table_pool[i] = CapTable{};
-            return &cap_table_pool[i];
-        }
-    }
-    return null;
+    const tbl = cap_table_pool.alloc() orelse return null;
+    tbl.* = CapTable{};
+    return tbl;
 }
 
 /// Free a capability table
 pub fn destroyTable(table: *CapTable) void {
-    // Clear all capabilities first
     clearAll(table);
-
-    // Return to pool
-    const index = (@intFromPtr(table) - @intFromPtr(&cap_table_pool)) / @sizeOf(CapTable);
-    if (index < MAX_CAP_TABLES) {
-        cap_table_used[index] = false;
-    }
+    cap_table_pool.free(table);
 }

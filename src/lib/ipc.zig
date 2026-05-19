@@ -5,6 +5,7 @@ const object = @import("object.zig");
 const thread = @import("thread.zig");
 const scheduler = @import("scheduler.zig");
 const capability = @import("capability.zig");
+const pool = @import("pool.zig");
 
 /// Maximum inline message data
 pub const MAX_INLINE_DATA: usize = 256;
@@ -428,45 +429,27 @@ pub fn setupSharedMemory(channel: *Channel, memory: *object.MemoryObject) void {
     memory.base.ref();
 }
 
-// Allocation pools for Phase 1
+/// Endpoint and channel pools — O(1) free-list allocators.
 const MAX_ENDPOINTS: usize = 256;
-var endpoint_pool: [MAX_ENDPOINTS]Endpoint = undefined;
-var endpoint_used: [MAX_ENDPOINTS]bool = [_]bool{false} ** MAX_ENDPOINTS;
+const EndpointPool = pool.Pool(Endpoint, MAX_ENDPOINTS);
+var endpoint_pool: EndpointPool = .{};
 
 const MAX_CHANNELS: usize = 128;
-var channel_pool: [MAX_CHANNELS]Channel = undefined;
-var channel_used: [MAX_CHANNELS]bool = [_]bool{false} ** MAX_CHANNELS;
+const ChannelPool = pool.Pool(Channel, MAX_CHANNELS);
+var channel_pool: ChannelPool = .{};
 
 fn allocEndpoint() ?*Endpoint {
-    for (&endpoint_used, 0..) |*used, i| {
-        if (!used.*) {
-            used.* = true;
-            return &endpoint_pool[i];
-        }
-    }
-    return null;
+    return endpoint_pool.alloc();
 }
 
 fn freeEndpoint(ep: *Endpoint) void {
-    const index = (@intFromPtr(ep) - @intFromPtr(&endpoint_pool)) / @sizeOf(Endpoint);
-    if (index < MAX_ENDPOINTS) {
-        endpoint_used[index] = false;
-    }
+    endpoint_pool.free(ep);
 }
 
 fn allocChannel() ?*Channel {
-    for (&channel_used, 0..) |*used, i| {
-        if (!used.*) {
-            used.* = true;
-            return &channel_pool[i];
-        }
-    }
-    return null;
+    return channel_pool.alloc();
 }
 
 fn freeChannel(ch: *Channel) void {
-    const index = (@intFromPtr(ch) - @intFromPtr(&channel_pool)) / @sizeOf(Channel);
-    if (index < MAX_CHANNELS) {
-        channel_used[index] = false;
-    }
+    channel_pool.free(ch);
 }

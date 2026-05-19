@@ -5,6 +5,7 @@ const pmm = @import("pmm.zig");
 const paging = @import("paging.zig");
 const framebuffer = @import("framebuffer.zig");
 const process = @import("process.zig");
+const pool = @import("pool.zig");
 
 /// Simple map flags for ELF loader and other uses
 pub const MapFlags = struct {
@@ -546,24 +547,15 @@ pub fn mapMmio(phys_addr: u64, size: u64) VmmError!u64 {
     return virt_addr;
 }
 
-// Simple AddressSpace struct pool for Phase 1
+/// Address-space pool — O(1) free-list allocator.
 const MAX_ADDRESS_SPACES: usize = 64;
-var address_space_pool: [MAX_ADDRESS_SPACES]AddressSpace = undefined;
-var address_space_used: [MAX_ADDRESS_SPACES]bool = [_]bool{false} ** MAX_ADDRESS_SPACES;
+const AddressSpacePool = pool.Pool(AddressSpace, MAX_ADDRESS_SPACES);
+var address_space_pool: AddressSpacePool = .{};
 
 fn allocAddressSpaceStruct() ?*AddressSpace {
-    for (&address_space_used, 0..) |*used, i| {
-        if (!used.*) {
-            used.* = true;
-            return &address_space_pool[i];
-        }
-    }
-    return null;
+    return address_space_pool.alloc();
 }
 
 fn freeAddressSpaceStruct(space: *AddressSpace) void {
-    const index = (@intFromPtr(space) - @intFromPtr(&address_space_pool)) / @sizeOf(AddressSpace);
-    if (index < MAX_ADDRESS_SPACES) {
-        address_space_used[index] = false;
-    }
+    address_space_pool.free(space);
 }

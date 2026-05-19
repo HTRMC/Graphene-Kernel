@@ -6,6 +6,7 @@ const pmm = @import("pmm.zig");
 const gdt = @import("gdt.zig");
 const usermode = @import("usermode.zig");
 const vmm = @import("vmm.zig");
+const pool = @import("pool.zig");
 
 /// Thread states
 pub const ThreadState = enum(u8) {
@@ -192,39 +193,28 @@ pub const WaitQueue = struct {
     }
 };
 
-/// Thread pool for Phase 1 (fixed allocation)
+/// Thread pool — O(1) free-list allocator.
 const MAX_THREADS: usize = 256;
-var thread_pool: [MAX_THREADS]Thread = undefined;
-var thread_used: [MAX_THREADS]bool = [_]bool{false} ** MAX_THREADS;
+const ThreadPool = pool.Pool(Thread, MAX_THREADS);
+var thread_pool: ThreadPool = .{};
 var next_tid: u32 = 1;
 
 /// Allocate a new thread
 pub fn allocThread() ?*Thread {
-    for (&thread_used, 0..) |*used, i| {
-        if (!used.*) {
-            used.* = true;
-            thread_pool[i] = Thread{};
-            thread_pool[i].tid = next_tid;
-            next_tid += 1;
-            return &thread_pool[i];
-        }
-    }
-    return null;
+    const t = thread_pool.alloc() orelse return null;
+    t.* = Thread{};
+    t.tid = next_tid;
+    next_tid += 1;
+    return t;
 }
 
 /// Free a thread
 pub fn freeThread(thread: *Thread) void {
-    // Free kernel stack
     if (thread.kernel_stack != 0) {
         const pages = KERNEL_STACK_SIZE / pmm.PAGE_SIZE;
         pmm.freeFrames(pmm.virtToPhys(thread.kernel_stack), pages);
     }
-
-    // Return to pool
-    const index = (@intFromPtr(thread) - @intFromPtr(&thread_pool)) / @sizeOf(Thread);
-    if (index < MAX_THREADS) {
-        thread_used[index] = false;
-    }
+    thread_pool.free(thread);
 }
 
 /// Create a kernel thread
@@ -335,21 +325,18 @@ pub fn wake(thread: *Thread) void {
 
 /// Get thread by TID
 pub fn getByTid(tid: u32) ?*Thread {
-    for (&thread_pool, thread_used) |*thread, used| {
-        if (used and thread.tid == tid) {
-            return thread;
-        }
+    var i: u32 = 0;
+    while (i < ThreadPool.CAPACITY) : (i += 1) {
+        if (!thread_pool.isUsed(i)) continue;
+        const t = thread_pool.at(i);
+        if (t.tid == tid) return t;
     }
     return null;
 }
 
 /// Count active threads
 pub fn countActive() u32 {
-    var count: u32 = 0;
-    for (thread_used) |used| {
-        if (used) count += 1;
-    }
-    return count;
+    return thread_pool.count();
 }
 
 /// Create a user thread

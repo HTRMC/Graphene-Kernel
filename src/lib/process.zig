@@ -5,6 +5,7 @@ const object = @import("object.zig");
 const capability = @import("capability.zig");
 const vmm = @import("vmm.zig");
 const thread = @import("thread.zig");
+const pool = @import("pool.zig");
 
 /// Maximum threads per process
 const MAX_THREADS_PER_PROCESS: usize = 64;
@@ -106,10 +107,10 @@ pub const ProcessFlags = packed struct(u8) {
     _reserved: u5 = 0,
 };
 
-/// Process pool for Phase 1
+/// Process pool — O(1) free-list allocator.
 const MAX_PROCESSES: usize = 64;
-var process_pool: [MAX_PROCESSES]Process = undefined;
-var process_used: [MAX_PROCESSES]bool = [_]bool{false} ** MAX_PROCESSES;
+const ProcessPool = pool.Pool(Process, MAX_PROCESSES);
+var process_pool: ProcessPool = .{};
 var next_pid: u32 = 1;
 
 /// Kernel process (PID 0)
@@ -140,24 +141,16 @@ pub fn getKernelProcess() *Process {
 
 /// Allocate a new process
 fn allocProcess() ?*Process {
-    for (&process_used, 0..) |*used, i| {
-        if (!used.*) {
-            used.* = true;
-            process_pool[i] = Process{};
-            process_pool[i].pid = next_pid;
-            next_pid += 1;
-            return &process_pool[i];
-        }
-    }
-    return null;
+    const proc = process_pool.alloc() orelse return null;
+    proc.* = Process{};
+    proc.pid = next_pid;
+    next_pid += 1;
+    return proc;
 }
 
 /// Free a process
 fn freeProcess(proc: *Process) void {
-    const index = (@intFromPtr(proc) - @intFromPtr(&process_pool)) / @sizeOf(Process);
-    if (index < MAX_PROCESSES) {
-        process_used[index] = false;
-    }
+    process_pool.free(proc);
 }
 
 /// Create a new process
@@ -284,21 +277,18 @@ pub fn setCurrentProcess(proc: ?*Process) void {
 pub fn getByPid(pid: u32) ?*Process {
     if (pid == 0) return &kernel_process;
 
-    for (&process_pool, process_used) |*proc, used| {
-        if (used and proc.pid == pid) {
-            return proc;
-        }
+    var i: u32 = 0;
+    while (i < ProcessPool.CAPACITY) : (i += 1) {
+        if (!process_pool.isUsed(i)) continue;
+        const proc = process_pool.at(i);
+        if (proc.pid == pid) return proc;
     }
     return null;
 }
 
 /// Count active processes
 pub fn countActive() u32 {
-    var count: u32 = 1; // Kernel process
-    for (process_used) |used| {
-        if (used) count += 1;
-    }
-    return count;
+    return 1 + process_pool.count(); // +1 for kernel process
 }
 
 /// Get list of active processes
@@ -307,18 +297,16 @@ pub fn countActive() u32 {
 pub fn getActiveList(buf: []*Process, max: usize) usize {
     var count: usize = 0;
 
-    // First add kernel process
     if (count < max and kernel_process_initialized) {
         buf[count] = &kernel_process;
         count += 1;
     }
 
-    // Then add user processes
-    for (&process_pool, process_used) |*proc, used| {
-        if (used and count < max) {
-            buf[count] = proc;
-            count += 1;
-        }
+    var i: u32 = 0;
+    while (i < ProcessPool.CAPACITY and count < max) : (i += 1) {
+        if (!process_pool.isUsed(i)) continue;
+        buf[count] = process_pool.at(i);
+        count += 1;
     }
 
     return count;
