@@ -4,53 +4,19 @@ setlocal enabledelayedexpansion
 :: Change to script directory
 cd /D "%~dp0"
 
-:: Read Zig version from .zigversion file
-set /p ZIG_VERSION=<.zigversion
+:: Prefer locally-installed compiler (compiler\zig\zig.exe), fall back to system zig on PATH.
 set ZIG_FOLDER=compiler\zig
-
-:: Check if compiler exists
 if exist "%ZIG_FOLDER%\zig.exe" (
-    echo Zig compiler found!
+    set ZIG_EXE="%ZIG_FOLDER%\zig.exe"
+    echo Using local Zig compiler.
 ) else (
-    echo Zig compiler not found. Installing version %ZIG_VERSION%...
-
-    :: Create compiler directory
-    if not exist compiler mkdir compiler
-
-    :: Determine URL based on version type (dev vs release)
-    echo %ZIG_VERSION% | findstr /C:"dev" >nul
-    if !errorlevel! equ 0 (
-        :: Dev version - use builds URL
-        set ZIG_ARCHIVE=zig-x86_64-windows-%ZIG_VERSION%
-        set ZIG_URL=https://ziglang.org/builds/!ZIG_ARCHIVE!.zip
-    ) else (
-        :: Release version - use download URL
-        set ZIG_ARCHIVE=zig-x86_64-windows-%ZIG_VERSION%
-        set ZIG_URL=https://ziglang.org/download/%ZIG_VERSION%/!ZIG_ARCHIVE!.zip
-    )
-
-    :: Download Zig
-    echo Downloading Zig from !ZIG_URL!...
-    curl -L -o "compiler\zig.zip" "!ZIG_URL!"
-
+    where zig >nul 2>&1
     if errorlevel 1 (
-        echo Failed to download Zig compiler!
+        echo No local compiler at %ZIG_FOLDER%\zig.exe and no 'zig' on PATH.
         exit /b 1
     )
-
-    :: Extract Zig
-    echo Extracting Zig...
-    tar -xf "compiler\zig.zip" -C compiler
-
-    :: Rename folder
-    if exist "compiler\!ZIG_ARCHIVE!" (
-        ren "compiler\!ZIG_ARCHIVE!" zig
-    )
-
-    :: Clean up
-    del "compiler\zig.zip"
-
-    echo Zig compiler installed successfully!
+    set ZIG_EXE=zig
+    echo Using system Zig from PATH.
 )
 
 :: Check if OVMF exists (needed for UEFI boot in QEMU)
@@ -80,7 +46,7 @@ echo.
 echo Building Graphene Kernel...
 echo.
 :: Use ReleaseSafe by default (Debug mode has ubsan issues with soft_float)
-"%ZIG_FOLDER%\zig.exe" build -Doptimize=ReleaseSafe %*
+%ZIG_EXE% build -Doptimize=ReleaseSafe %*
 
 if errorlevel 1 (
     echo.

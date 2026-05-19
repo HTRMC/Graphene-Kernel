@@ -2,6 +2,7 @@
 // Interactive command-line shell
 
 const syscall = @import("syscall");
+const vfs = @import("vfs");
 
 /// Command buffer
 const MAX_CMD_LEN: usize = 128;
@@ -67,6 +68,159 @@ fn cmdHelp() void {
     syscall.print("  ps       - List running processes\n");
     syscall.print("  mem      - Show memory statistics\n");
     syscall.print("  uptime   - Show system uptime\n");
+    syscall.print("  ls       - List files (ramfs)\n");
+    syscall.print("  cat      - Print file contents\n");
+    syscall.print("  stat     - Show file metadata\n");
+    syscall.print("  touch    - Create empty file\n");
+    syscall.print("  write    - Write text to file\n");
+    syscall.print("  rm       - Delete file\n");
+}
+
+// ============================================================================
+// VFS commands
+// ============================================================================
+
+fn printFsError(err: vfs.FsError) void {
+    switch (err) {
+        .success => syscall.print("success"),
+        .not_found => syscall.print("not found"),
+        .exists => syscall.print("already exists"),
+        .no_space => syscall.print("no space"),
+        .invalid_arg => syscall.print("invalid argument"),
+        .is_directory => syscall.print("is a directory"),
+        .not_directory => syscall.print("not a directory"),
+        .not_empty => syscall.print("not empty"),
+        .io_error => syscall.print("io error"),
+        .permission => syscall.print("permission denied"),
+    }
+}
+
+fn cmdLs() void {
+    var reply_buf: [vfs.MAX_MSG_DATA]u8 = undefined;
+    const result = vfs.call(.readdir, "", 0, 0, &.{}, &reply_buf);
+    const count = vfs.readdirCount(&reply_buf);
+    if (count < 0) {
+        syscall.print("ls: ");
+        printFsError(result.err);
+        syscall.print("\n");
+        return;
+    }
+
+    var pos: usize = 0;
+    var n: i32 = 0;
+    while (n < count and pos + 2 <= result.payload.len) : (n += 1) {
+        const name_len: usize = result.payload[pos];
+        const ftype = result.payload[pos + 1];
+        if (pos + 2 + name_len > result.payload.len) break;
+        const name = result.payload[pos + 2 ..][0..name_len];
+        if (ftype == @intFromEnum(vfs.FileType.directory)) syscall.print("d ") else syscall.print("- ");
+        _ = syscall.debugPrint(name);
+        syscall.print("\n");
+        pos += 2 + name_len;
+    }
+}
+
+fn cmdCat(args: []const u8) void {
+    if (args.len == 0) {
+        syscall.print("usage: cat <file>\n");
+        return;
+    }
+    var reply_buf: [vfs.MAX_MSG_DATA]u8 = undefined;
+    var offset: u32 = 0;
+    while (true) {
+        const max_chunk: u32 = @intCast(reply_buf.len - @sizeOf(vfs.ResponseHeader));
+        const result = vfs.call(.read, args, offset, max_chunk, &.{}, &reply_buf);
+        if (result.err != .success) {
+            syscall.print("cat: ");
+            printFsError(result.err);
+            syscall.print("\n");
+            return;
+        }
+        if (result.payload.len == 0) break;
+        _ = syscall.debugPrint(result.payload);
+        offset += @intCast(result.payload.len);
+        if (result.payload.len < max_chunk) break;
+    }
+}
+
+fn cmdStat(args: []const u8) void {
+    if (args.len == 0) {
+        syscall.print("usage: stat <file>\n");
+        return;
+    }
+    var reply_buf: [vfs.MAX_MSG_DATA]u8 = undefined;
+    const result = vfs.call(.stat, args, 0, 0, &.{}, &reply_buf);
+    if (result.err != .success) {
+        syscall.print("stat: ");
+        printFsError(result.err);
+        syscall.print("\n");
+        return;
+    }
+    if (result.payload.len < @sizeOf(vfs.FileStat)) {
+        syscall.print("stat: short reply\n");
+        return;
+    }
+    const st: *const vfs.FileStat = @ptrCast(@alignCast(result.payload.ptr));
+    syscall.print("  type: ");
+    if (st.file_type == @intFromEnum(vfs.FileType.directory)) {
+        syscall.print("directory\n");
+    } else {
+        syscall.print("regular\n");
+    }
+    syscall.print("  size: ");
+    printNum(st.size);
+    syscall.print(" bytes\n");
+}
+
+fn cmdTouch(args: []const u8) void {
+    if (args.len == 0) {
+        syscall.print("usage: touch <file>\n");
+        return;
+    }
+    var reply_buf: [vfs.MAX_MSG_DATA]u8 = undefined;
+    const result = vfs.call(.create, args, 0, 0, &.{}, &reply_buf);
+    if (result.err != .success) {
+        syscall.print("touch: ");
+        printFsError(result.err);
+        syscall.print("\n");
+    }
+}
+
+fn cmdWrite(args: []const u8) void {
+    // usage: write <name> <text...>
+    var i: usize = 0;
+    while (i < args.len and args[i] != ' ') : (i += 1) {}
+    if (i == 0 or i == args.len) {
+        syscall.print("usage: write <file> <text>\n");
+        return;
+    }
+    const name = args[0..i];
+    while (i < args.len and args[i] == ' ') : (i += 1) {}
+    const text = args[i..];
+
+    var reply_buf: [vfs.MAX_MSG_DATA]u8 = undefined;
+    // Ensure file exists (ignore exists error)
+    _ = vfs.call(.create, name, 0, 0, &.{}, &reply_buf);
+    const result = vfs.call(.write, name, 0, 0, text, &reply_buf);
+    if (result.err != .success) {
+        syscall.print("write: ");
+        printFsError(result.err);
+        syscall.print("\n");
+    }
+}
+
+fn cmdRm(args: []const u8) void {
+    if (args.len == 0) {
+        syscall.print("usage: rm <file>\n");
+        return;
+    }
+    var reply_buf: [vfs.MAX_MSG_DATA]u8 = undefined;
+    const result = vfs.call(.delete, args, 0, 0, &.{}, &reply_buf);
+    if (result.err != .success) {
+        syscall.print("rm: ");
+        printFsError(result.err);
+        syscall.print("\n");
+    }
 }
 
 fn cmdClear() void {
@@ -500,6 +654,18 @@ fn executeCommand(cmd: []const u8) void {
         cmdMem();
     } else if (strEql(command, "uptime")) {
         cmdUptime();
+    } else if (strEql(command, "ls")) {
+        cmdLs();
+    } else if (strEql(command, "cat")) {
+        cmdCat(args);
+    } else if (strEql(command, "stat")) {
+        cmdStat(args);
+    } else if (strEql(command, "touch")) {
+        cmdTouch(args);
+    } else if (strEql(command, "write")) {
+        cmdWrite(args);
+    } else if (strEql(command, "rm")) {
+        cmdRm(args);
     } else {
         cmdUnknown(command);
     }

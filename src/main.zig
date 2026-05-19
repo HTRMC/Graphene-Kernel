@@ -38,6 +38,8 @@ const usermode = @import("lib/usermode.zig");
 const driver = @import("lib/driver.zig");
 const serial = @import("lib/serial.zig");
 const apic = @import("lib/apic.zig");
+const ipc = @import("lib/ipc.zig");
+const capability = @import("lib/capability.zig");
 
 /// Debug logging - only enabled in Debug builds
 const debug_enabled = builtin.mode == .Debug;
@@ -230,6 +232,8 @@ export fn _start() callconv(.c) noreturn {
 
     // Load boot modules
     var init_loaded = false;
+    var ramfs_proc: ?*process.Process = null;
+    var shell_proc: ?*process.Process = null;
     if (module_request.response) |mod_response| {
         const modules = mod_response.getModules();
         printInfo("Loading boot modules..."); // TODO: make sure this text doesnt overlap. the text Running in user mode!
@@ -250,18 +254,25 @@ export fn _start() callconv(.c) noreturn {
                 }
             } else if (strEql(module_name, "shell")) {
                 // Load shell as a user process
-                if (loadUserProcess(module, "shell")) {
-                    printOk("Loaded: shell");
-                }
+                shell_proc = loadUserProcessP(module, "shell");
+                if (shell_proc != null) printOk("Loaded: shell");
             } else if (strEql(module_name, "ramfs")) {
                 // Load ramfs as a filesystem service
-                if (loadUserProcess(module, "ramfs")) {
-                    printOk("Loaded: ramfs (filesystem service)");
-                }
+                ramfs_proc = loadUserProcessP(module, "ramfs");
+                if (ramfs_proc != null) printOk("Loaded: ramfs (filesystem service)");
             } else {
                 // Unknown module - try to load as generic driver
                 printInfo("Skipping unknown module");
             }
+        }
+    }
+
+    // Wire VFS endpoint: ramfs gets HANDLE, shell gets SEND, at VFS_CAP_SLOT.
+    if (ramfs_proc != null and shell_proc != null) {
+        if (wireVfsEndpoint(ramfs_proc.?, shell_proc.?)) {
+            printOk("VFS endpoint wired (slot 1)");
+        } else {
+            printFail("VFS endpoint wire failed");
         }
     }
 
@@ -416,6 +427,85 @@ fn strEql(a: []const u8, b: []const u8) bool {
         if (ac != bc) return false;
     }
     return true;
+}
+
+/// Well-known VFS capability slot — must match user/lib/vfs.zig
+const VFS_CAP_SLOT: u32 = 1;
+
+/// Create a VFS endpoint and inject the cap into ramfs (HANDLE) and shell (SEND).
+fn wireVfsEndpoint(ramfs: *process.Process, shell: *process.Process) bool {
+    const endpoint = ipc.createEndpoint() orelse return false;
+
+    const ramfs_table = ramfs.cap_table orelse return false;
+    const shell_table = shell.cap_table orelse return false;
+
+    // ramfs listens: needs HANDLE rights for cap_recv, plus SEND so it can reply via same endpoint
+    const server_rights = capability.Rights{ .handle = true, .send = true };
+    capability.insertAt(ramfs_table, VFS_CAP_SLOT, &endpoint.base, server_rights) catch return false;
+
+    // shell calls: needs SEND for cap_call's send, plus HANDLE so it can receive the reply
+    const client_rights = capability.Rights{ .send = true, .handle = true };
+    capability.insertAt(shell_table, VFS_CAP_SLOT, &endpoint.base, client_rights) catch {
+        capability.delete(ramfs_table, VFS_CAP_SLOT);
+        return false;
+    };
+
+    return true;
+}
+
+/// Load a generic user process from boot module, return process pointer.
+fn loadUserProcessP(module: *limine.File, name: []const u8) ?*process.Process {
+    const module_addr: u64 = @intFromPtr(module.address);
+    const module_size = module.size;
+
+    if (module_size == 0) {
+        printFail("User module is empty");
+        return null;
+    }
+
+    const module_data: [*]const u8 = @ptrFromInt(module_addr);
+    const data_slice = module_data[0..module_size];
+
+    if (!elf.isElf(data_slice)) {
+        printFail("User module is not a valid ELF");
+        return null;
+    }
+
+    const user_proc = process.create(null) orelse {
+        printFail("Failed to create user process");
+        return null;
+    };
+
+    user_proc.setName(name);
+
+    const space = user_proc.address_space orelse {
+        printFail("User process has no address space");
+        process.destroy(user_proc);
+        return null;
+    };
+
+    const load_result = elf.load(space, data_slice) catch {
+        printFail("Failed to load user ELF");
+        process.destroy(user_proc);
+        return null;
+    };
+
+    _ = usermode.allocateUserStack(space) catch {
+        printFail("Failed to allocate user stack");
+        process.destroy(user_proc);
+        return null;
+    };
+
+    const user_thread = thread.createUser(user_proc, load_result.entry_point, usermode.USER_STACK_TOP - 8) orelse {
+        printFail("Failed to create user thread");
+        process.destroy(user_proc);
+        return null;
+    };
+
+    _ = user_proc.addThread(user_thread);
+    scheduler.enqueue(user_thread);
+
+    return user_proc;
 }
 
 /// Load a generic user process from boot module

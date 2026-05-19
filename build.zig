@@ -67,6 +67,17 @@ pub fn build(b: *std.Build) void {
         .strip = true,
     });
 
+    // Shared VFS protocol module (depends on syscall)
+    const vfs_module = b.createModule(.{
+        .root_source_file = b.path("user/lib/vfs.zig"),
+        .target = user_target,
+        .optimize = .ReleaseSafe,
+        .strip = true,
+        .imports = &.{
+            .{ .name = "syscall", .module = syscall_module },
+        },
+    });
+
     // Init process module (start.zig is root, calls main from init)
     const init_main_module = b.createModule(.{
         .root_source_file = b.path("user/init/main.zig"),
@@ -114,6 +125,7 @@ pub fn build(b: *std.Build) void {
         .strip = true,
         .imports = &.{
             .{ .name = "syscall", .module = syscall_module },
+            .{ .name = "vfs", .module = vfs_module },
         },
     });
 
@@ -192,6 +204,7 @@ pub fn build(b: *std.Build) void {
         .strip = true,
         .imports = &.{
             .{ .name = "syscall", .module = syscall_module },
+            .{ .name = "vfs", .module = vfs_module },
         },
     });
 
