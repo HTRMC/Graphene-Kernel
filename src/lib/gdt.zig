@@ -194,9 +194,15 @@ pub fn init() void {
     loadTss();
 }
 
+/// SYSCALL entry stub reads this to find the running thread's kernel stack.
+/// Defined in syscall.zig; mirrored here on every TSS RSP0 update so the
+/// IDT-based and fast-syscall paths agree.
+extern var syscall_kernel_rsp: u64;
+
 /// Set the kernel stack pointer in TSS (used for ring 3 -> ring 0 transitions)
 pub fn setKernelStack(stack: u64) void {
     tss.setKernelStack(stack);
+    syscall_kernel_rsp = stack;
 }
 
 /// Set an IST entry for interrupt handling with separate stack

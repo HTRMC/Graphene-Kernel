@@ -57,54 +57,56 @@ pub const ProcessInfoEntry = extern struct {
     name: [32]u8,
 };
 
-/// Raw syscall with 0-6 arguments
+// Fast syscall ABI: number in RAX, args in RDI/RSI/RDX/R10/R8/R9.
+// The `syscall` instruction clobbers RCX (user RIP) and R11 (RFLAGS).
+
 inline fn syscall0(num: u64) i64 {
-    return asm volatile ("int $0x80"
+    return asm volatile ("syscall"
         : [ret] "={rax}" (-> i64),
         : [num] "{rax}" (num),
-        : .{ .memory = true });
+        : .{ .memory = true, .rcx = true, .r11 = true });
 }
 
 inline fn syscall1(num: u64, a1: u64) i64 {
-    return asm volatile ("int $0x80"
+    return asm volatile ("syscall"
         : [ret] "={rax}" (-> i64),
         : [num] "{rax}" (num),
           [a1] "{rdi}" (a1),
-        : .{ .memory = true });
+        : .{ .memory = true, .rcx = true, .r11 = true });
 }
 
 inline fn syscall2(num: u64, a1: u64, a2: u64) i64 {
-    return asm volatile ("int $0x80"
+    return asm volatile ("syscall"
         : [ret] "={rax}" (-> i64),
         : [num] "{rax}" (num),
           [a1] "{rdi}" (a1),
           [a2] "{rsi}" (a2),
-        : .{ .memory = true });
+        : .{ .memory = true, .rcx = true, .r11 = true });
 }
 
 inline fn syscall3(num: u64, a1: u64, a2: u64, a3: u64) i64 {
-    return asm volatile ("int $0x80"
+    return asm volatile ("syscall"
         : [ret] "={rax}" (-> i64),
         : [num] "{rax}" (num),
           [a1] "{rdi}" (a1),
           [a2] "{rsi}" (a2),
           [a3] "{rdx}" (a3),
-        : .{ .memory = true });
+        : .{ .memory = true, .rcx = true, .r11 = true });
 }
 
 inline fn syscall4(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) i64 {
-    return asm volatile ("int $0x80"
+    return asm volatile ("syscall"
         : [ret] "={rax}" (-> i64),
         : [num] "{rax}" (num),
           [a1] "{rdi}" (a1),
           [a2] "{rsi}" (a2),
           [a3] "{rdx}" (a3),
           [a4] "{r10}" (a4),
-        : .{ .memory = true });
+        : .{ .memory = true, .rcx = true, .r11 = true });
 }
 
 inline fn syscall5(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) i64 {
-    return asm volatile ("int $0x80"
+    return asm volatile ("syscall"
         : [ret] "={rax}" (-> i64),
         : [num] "{rax}" (num),
           [a1] "{rdi}" (a1),
@@ -112,7 +114,7 @@ inline fn syscall5(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) i64 {
           [a3] "{rdx}" (a3),
           [a4] "{r10}" (a4),
           [a5] "{r8}" (a5),
-        : .{ .memory = true });
+        : .{ .memory = true, .rcx = true, .r11 = true });
 }
 
 // ============================================================================

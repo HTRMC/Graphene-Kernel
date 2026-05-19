@@ -107,11 +107,26 @@ fn wrmsr(msr: u32, value: u64) void {
 /// Syscall handler state
 var syscall_initialized: bool = false;
 
-/// Initialize syscall mechanism
-pub fn init() void {
-    // For Phase 1, we use int 0x80 which is already set up in IDT
-    // Fast syscall/sysret setup is more complex and requires per-CPU data
+/// Kernel RSP that the SYSCALL entry stub switches to. Updated by
+/// gdt.setKernelStack on every context switch so that the running
+/// thread's kernel stack is always installed.
+pub export var syscall_kernel_rsp: u64 = 0;
 
+/// Scratch slot used by the SYSCALL entry stub to stash the user RSP
+/// while it switches to the kernel stack.
+pub export var syscall_user_rsp: u64 = 0;
+
+/// Update the kernel stack used by the SYSCALL entry path. Mirrors
+/// gdt.setKernelStack so that both the IDT-based and fast-syscall
+/// entry paths agree on the active kernel stack.
+pub fn setKernelStack(stack: u64) void {
+    syscall_kernel_rsp = stack;
+}
+
+/// Initialize syscall mechanism — installs the fast SYSCALL/SYSRET path
+/// alongside the legacy int 0x80 entry, then enables SCE so user code
+/// can issue the `syscall` instruction.
+pub fn init() void {
     // Enable SCE (System Call Extensions) in EFER
     var efer = rdmsr(IA32_EFER);
     efer |= 1; // SCE bit
@@ -127,13 +142,90 @@ pub fn init() void {
     const star_value = (sysret_base << 48) | (syscall_base << 32);
     wrmsr(IA32_STAR, star_value);
 
-    // Set LSTAR to syscall entry (for fast syscall - not used in Phase 1)
-    // wrmsr(IA32_LSTAR, @intFromPtr(&syscall_entry_fast));
+    // Install the fast SYSCALL entry stub.
+    wrmsr(IA32_LSTAR, @intFromPtr(&syscallEntryFast));
 
-    // Set FMASK - flags to clear on syscall (clear IF)
+    // Set FMASK - flags to clear on syscall (clear IF — interrupts off inside entry)
     wrmsr(IA32_FMASK, 0x200);
 
     syscall_initialized = true;
+}
+
+/// SYSCALL entry point. The CPU has already:
+///   - swapped CS/SS to kernel selectors (from STAR)
+///   - put user RIP in RCX, user RFLAGS in R11
+///   - left RSP pointing at the user stack
+/// We switch to the running thread's kernel stack, build the same frame
+/// shape that `int 0x80` produces, dispatch through `handle`, then
+/// SYSRETQ back to user mode.
+pub fn syscallEntryFast() callconv(.naked) noreturn {
+    asm volatile (
+        \\ // Stash user RSP, load kernel RSP.
+        \\ mov %%rsp, syscall_user_rsp(%%rip)
+        \\ mov syscall_kernel_rsp(%%rip), %%rsp
+        \\
+        \\ // Build an InterruptFrame-shaped record.
+        \\ pushq $0x1b                     // SS = user data
+        \\ pushq syscall_user_rsp(%%rip)   // user RSP
+        \\ pushq %%r11                     // RFLAGS (CPU stashed user RFLAGS here)
+        \\ pushq $0x23                     // CS = user code
+        \\ pushq %%rcx                     // RIP (CPU stashed user RIP here)
+        \\ pushq $0                        // error_code
+        \\ pushq $0x80                     // vector — reuse the int 0x80 dispatch path
+        \\
+        \\ // Save all GPRs in the same order as interruptCommon.
+        \\ pushq %%rax
+        \\ pushq %%rbx
+        \\ pushq %%rcx
+        \\ pushq %%rdx
+        \\ pushq %%rsi
+        \\ pushq %%rdi
+        \\ pushq %%rbp
+        \\ pushq %%r8
+        \\ pushq %%r9
+        \\ pushq %%r10
+        \\ pushq %%r11
+        \\ pushq %%r12
+        \\ pushq %%r13
+        \\ pushq %%r14
+        \\ pushq %%r15
+        \\
+        \\ movq %%rsp, %%rdi
+    );
+    asm volatile ("call %[handler:P]"
+        :
+        : [handler] "X" (&fastSyscallHandler),
+    );
+    asm volatile (
+        \\ popq %%r15
+        \\ popq %%r14
+        \\ popq %%r13
+        \\ popq %%r12
+        \\ popq %%r11
+        \\ popq %%r10
+        \\ popq %%r9
+        \\ popq %%r8
+        \\ popq %%rbp
+        \\ popq %%rdi
+        \\ popq %%rsi
+        \\ popq %%rdx
+        \\ popq %%rcx
+        \\ popq %%rbx
+        \\ popq %%rax
+        \\
+        \\ addq $16, %%rsp        // pop error_code + vector
+        \\ popq %%rcx              // RIP -> RCX (sysretq input)
+        \\ addq $8, %%rsp          // skip CS
+        \\ popq %%r11              // RFLAGS -> R11 (sysretq input)
+        \\ popq %%rsp              // restore user RSP (SS slot left dangling above)
+        \\ sysretq
+    );
+}
+
+/// Bridge from the naked SYSCALL stub into the regular `handle` path.
+/// Kept in Zig so the asm above stays minimal.
+fn fastSyscallHandler(frame: *idt.InterruptFrame) callconv(.c) void {
+    handle(frame);
 }
 
 /// Main syscall handler (called from IDT handler via interrupt_handler)
