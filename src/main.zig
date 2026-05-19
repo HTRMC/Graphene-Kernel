@@ -234,6 +234,7 @@ export fn _start() callconv(.c) noreturn {
     var init_loaded = false;
     var ramfs_proc: ?*process.Process = null;
     var shell_proc: ?*process.Process = null;
+    var logger_proc: ?*process.Process = null;
     if (module_request.response) |mod_response| {
         const modules = mod_response.getModules();
         printInfo("Loading boot modules..."); // TODO: make sure this text doesnt overlap. the text Running in user mode!
@@ -260,6 +261,10 @@ export fn _start() callconv(.c) noreturn {
                 // Load ramfs as a filesystem service
                 ramfs_proc = loadUserProcessP(module, "ramfs");
                 if (ramfs_proc != null) printOk("Loaded: ramfs (filesystem service)");
+            } else if (strEql(module_name, "logger")) {
+                // Load logger as a text-logging service
+                logger_proc = loadUserProcessP(module, "logger");
+                if (logger_proc != null) printOk("Loaded: logger (text-logging service)");
             } else {
                 // Unknown module - try to load as generic driver
                 printInfo("Skipping unknown module");
@@ -273,6 +278,15 @@ export fn _start() callconv(.c) noreturn {
             printOk("VFS endpoint wired (slot 1)");
         } else {
             printFail("VFS endpoint wire failed");
+        }
+    }
+
+    // Wire LOG endpoint: logger gets HANDLE, shell gets SEND, at LOG_CAP_SLOT.
+    if (logger_proc != null and shell_proc != null) {
+        if (wireServiceEndpoint(logger_proc.?, shell_proc.?, LOG_CAP_SLOT)) {
+            printOk("LOG endpoint wired (slot 2)");
+        } else {
+            printFail("LOG endpoint wire failed");
         }
     }
 
@@ -429,24 +443,30 @@ fn strEql(a: []const u8, b: []const u8) bool {
     return true;
 }
 
-/// Well-known VFS capability slot — must match user/lib/vfs.zig
+/// Well-known capability slots for user-space service endpoints.
+/// Must match the constants in user/lib/vfs.zig and user/lib/log.zig.
 const VFS_CAP_SLOT: u32 = 1;
+const LOG_CAP_SLOT: u32 = 2;
 
 /// Create a VFS endpoint and inject the cap into ramfs (HANDLE) and shell (SEND).
 fn wireVfsEndpoint(ramfs: *process.Process, shell: *process.Process) bool {
+    return wireServiceEndpoint(ramfs, shell, VFS_CAP_SLOT);
+}
+
+/// Create an IPC endpoint and give server HANDLE+SEND, client SEND+HANDLE
+/// at the same well-known slot in both cap tables.
+fn wireServiceEndpoint(server: *process.Process, client: *process.Process, slot: u32) bool {
     const endpoint = ipc.createEndpoint() orelse return false;
 
-    const ramfs_table = ramfs.cap_table orelse return false;
-    const shell_table = shell.cap_table orelse return false;
+    const server_table = server.cap_table orelse return false;
+    const client_table = client.cap_table orelse return false;
 
-    // ramfs listens: needs HANDLE rights for cap_recv, plus SEND so it can reply via same endpoint
     const server_rights = capability.Rights{ .handle = true, .send = true };
-    capability.insertAt(ramfs_table, VFS_CAP_SLOT, &endpoint.base, server_rights) catch return false;
+    capability.insertAt(server_table, slot, &endpoint.base, server_rights) catch return false;
 
-    // shell calls: needs SEND for cap_call's send, plus HANDLE so it can receive the reply
     const client_rights = capability.Rights{ .send = true, .handle = true };
-    capability.insertAt(shell_table, VFS_CAP_SLOT, &endpoint.base, client_rights) catch {
-        capability.delete(ramfs_table, VFS_CAP_SLOT);
+    capability.insertAt(client_table, slot, &endpoint.base, client_rights) catch {
+        capability.delete(server_table, slot);
         return false;
     };
 

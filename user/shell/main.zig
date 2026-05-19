@@ -3,6 +3,7 @@
 
 const syscall = @import("syscall");
 const vfs = @import("vfs");
+const logsvc = @import("log");
 
 /// Command buffer
 const MAX_CMD_LEN: usize = 128;
@@ -206,6 +207,17 @@ fn cmdWrite(args: []const u8) void {
         syscall.print("write: ");
         printFsError(result.err);
         syscall.print("\n");
+    }
+}
+
+fn cmdLog(args: []const u8) void {
+    if (args.len == 0) {
+        syscall.print("usage: log <text>\n");
+        return;
+    }
+    const ret = logsvc.log(args);
+    if (ret < 0) {
+        syscall.print("log: error\n");
     }
 }
 
@@ -666,6 +678,8 @@ fn executeCommand(cmd: []const u8) void {
         cmdWrite(args);
     } else if (strEql(command, "rm")) {
         cmdRm(args);
+    } else if (strEql(command, "log")) {
+        cmdLog(args);
     } else {
         cmdUnknown(command);
     }

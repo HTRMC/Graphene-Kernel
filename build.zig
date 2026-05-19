@@ -78,6 +78,17 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // Shared logger protocol module (depends on syscall)
+    const log_module = b.createModule(.{
+        .root_source_file = b.path("user/lib/log.zig"),
+        .target = user_target,
+        .optimize = .ReleaseSafe,
+        .strip = true,
+        .imports = &.{
+            .{ .name = "syscall", .module = syscall_module },
+        },
+    });
+
     // Init process module (start.zig is root, calls main from init)
     const init_main_module = b.createModule(.{
         .root_source_file = b.path("user/init/main.zig"),
@@ -126,6 +137,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "syscall", .module = syscall_module },
             .{ .name = "vfs", .module = vfs_module },
+            .{ .name = "log", .module = log_module },
         },
     });
 
@@ -233,6 +245,43 @@ pub fn build(b: *std.Build) void {
 
     // Install ramfs binary
     b.installArtifact(ramfs);
+
+    // ========================================
+    // User space: logger service
+    // ========================================
+    const logger_main_module = b.createModule(.{
+        .root_source_file = b.path("user/services/logger/main.zig"),
+        .target = user_target,
+        .optimize = .ReleaseSafe,
+        .strip = true,
+        .imports = &.{
+            .{ .name = "syscall", .module = syscall_module },
+            .{ .name = "log", .module = log_module },
+        },
+    });
+
+    const logger_module = b.createModule(.{
+        .root_source_file = b.path("user/lib/start.zig"),
+        .target = user_target,
+        .optimize = .ReleaseSafe,
+        .strip = true,
+        .unwind_tables = .none,
+        .imports = &.{
+            .{ .name = "syscall", .module = syscall_module },
+            .{ .name = "main", .module = logger_main_module },
+        },
+    });
+
+    logger_module.red_zone = false;
+
+    const logger = b.addExecutable(.{
+        .name = "logger",
+        .root_module = logger_module,
+    });
+
+    logger.setLinkerScript(b.path("user/linker-user.ld"));
+
+    b.installArtifact(logger);
 
     // ========================================
     // Build ISO step

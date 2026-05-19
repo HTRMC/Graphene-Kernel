@@ -53,6 +53,12 @@ if exist "zig-out\bin\ramfs" (
     echo Copied ramfs service to ISO
 )
 
+:: Copy logger service (if it exists)
+if exist "zig-out\bin\logger" (
+    copy "zig-out\bin\logger" "%ISO_ROOT%\boot\logger"
+    echo Copied logger service to ISO
+)
+
 :: Copy Limine config
 copy "limine.conf" "%ISO_ROOT%\boot\limine\limine.conf"
 
