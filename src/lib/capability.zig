@@ -322,22 +322,43 @@ pub fn copyToTable(
     return dst_slot;
 }
 
-/// Revoke capability (invalidates the slot)
-/// Note: Full revocation tree walking is not implemented in Phase 1
+/// Revoke a capability and every other capability across every cap table
+/// that refers to the same kernel object. Generation-based invalidation
+/// already makes derived caps fail `isValid()`, but this sweep also
+/// reclaims their table slots and drops their refcounts so the object
+/// can actually be torn down.
 pub fn revoke(table: *CapTable, slot: CapSlot) void {
     if (slot >= MAX_CAPS) return;
     if (!table.isSlotUsed(slot)) return;
 
     const cap = &table.slots[slot];
-    if (cap.obj) |obj| {
-        // Invalidate the object (increments generation)
-        // This will cause all capabilities with old generation to fail validation
-        obj.invalidate();
-        _ = obj.unref();
-    }
+    const obj = cap.obj orelse {
+        cap.clear();
+        table.markSlotFree(slot);
+        return;
+    };
 
-    cap.clear();
-    table.markSlotFree(slot);
+    obj.invalidate();
+    revokeAllReferencesTo(obj);
+}
+
+/// Sweep every live cap table; clear any slot pointing at `obj` and
+/// drop its refcount. Used by `revoke` and by `destroyObject`-style
+/// teardown paths.
+pub fn revokeAllReferencesTo(obj: *object.Object) void {
+    for (&cap_table_pool, cap_table_used) |*tbl, used| {
+        if (!used) continue;
+        var i: CapSlot = 0;
+        while (i < MAX_CAPS) : (i += 1) {
+            if (!tbl.isSlotUsed(i)) continue;
+            const c = &tbl.slots[i];
+            if (c.obj == obj) {
+                _ = obj.unref();
+                c.clear();
+                tbl.markSlotFree(i);
+            }
+        }
+    }
 }
 
 /// Validate a capability (quick check without lookup)
