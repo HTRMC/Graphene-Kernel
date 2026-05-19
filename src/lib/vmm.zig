@@ -4,6 +4,7 @@
 const pmm = @import("pmm.zig");
 const paging = @import("paging.zig");
 const framebuffer = @import("framebuffer.zig");
+const process = @import("process.zig");
 
 /// Simple map flags for ELF loader and other uses
 pub const MapFlags = struct {
@@ -20,7 +21,8 @@ pub const VmFlags = packed struct(u8) {
     user: bool = false,
     guard: bool = false, // Guard page (no backing memory)
     shared: bool = false, // Shared memory region
-    _reserved: u2 = 0,
+    lazy: bool = false, // Demand-paged: backing pages allocated on first fault
+    _reserved: u1 = 0,
 
     /// Convert to page table flags
     pub fn toPageFlags(self: VmFlags) paging.PageFlags {
@@ -390,6 +392,26 @@ pub fn mapRegionAlloc(space: *AddressSpace, vaddr: u64, size: u64, flags: VmFlag
     }
 }
 
+/// Map a region lazily: tracking only, no backing pages.
+/// Pages are allocated on first access via handlePageFault.
+pub fn mapRegionLazy(space: *AddressSpace, vaddr: u64, size: u64, flags: VmFlags) VmmError!void {
+    if (flags.write and flags.execute) {
+        return VmmError.WxViolation;
+    }
+
+    const aligned_vaddr = vaddr & ~(pmm.PAGE_SIZE - 1);
+    const aligned_size = ((size + pmm.PAGE_SIZE - 1) / pmm.PAGE_SIZE) * pmm.PAGE_SIZE;
+
+    var lazy_flags = flags;
+    lazy_flags.lazy = true;
+
+    try space.addRegion(.{
+        .start = aligned_vaddr,
+        .size = aligned_size,
+        .flags = lazy_flags,
+    });
+}
+
 /// Unmap a region
 pub fn unmapRegion(space: *AddressSpace, vaddr: u64) void {
     const region = space.findRegion(vaddr) orelse return;
@@ -438,19 +460,40 @@ pub fn handlePageFault(vaddr: u64, error_code: u64) bool {
     // Guard page - intentional fault
     if (region.flags.guard) return false;
 
-    // For Phase 1, we don't do demand paging - all regions are fully mapped
-    // So if we get here, it's a real fault
+    // Demand paging: lazy region — allocate a backing page on first access.
+    if (region.flags.lazy) {
+        const page_vaddr = vaddr & ~@as(u64, pmm.PAGE_SIZE - 1);
+        const paddr = pmm.allocFrame() orelse return false;
+
+        // Zero the page
+        const page_virt: [*]u8 = @ptrFromInt(pmm.physToVirt(paddr));
+        for (0..pmm.PAGE_SIZE) |i| {
+            page_virt[i] = 0;
+        }
+
+        // Page flags follow the region (lazy bit irrelevant at PT level).
+        const page_flags = paging.PageFlags{
+            .present = true,
+            .writable = region.flags.write,
+            .user_accessible = region.flags.user,
+            .no_execute = !region.flags.execute,
+        };
+
+        paging.mapPageForce(space.pml4_phys, page_vaddr, paddr, page_flags) catch {
+            pmm.freeFrame(paddr);
+            return false;
+        };
+        return true;
+    }
+
     return false;
 }
 
-/// Get current address space (from CR3)
+/// Get current address space (from current process; falls back to kernel space).
 pub fn getCurrentAddressSpace() *AddressSpace {
-    const cr3 = paging.readCr3();
-    if (cr3 == kernel_pml4) {
-        return &kernel_space;
+    if (process.getCurrentProcess()) |proc| {
+        if (proc.address_space) |space| return space;
     }
-    // For Phase 1, return kernel space
-    // Later, get from current thread's process
     return &kernel_space;
 }
 

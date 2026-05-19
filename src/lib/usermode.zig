@@ -183,22 +183,17 @@ const InterruptFrameMinimal = extern struct {
     ss: u64,
 };
 
-/// Allocate and map a user stack in the given address space
-/// The region below USER_STACK_BOTTOM (GUARD_PAGE_ADDR) is intentionally
-/// left unmapped to serve as a guard page. Any access to this region
-/// will cause a page fault, allowing detection of stack overflow.
+/// Allocate a user stack region lazily. Backing pages are allocated on first
+/// access (demand paging). The region below USER_STACK_BOTTOM is left
+/// unmapped to serve as a guard page; stack overflow still faults.
 pub fn allocateUserStack(space: *vmm.AddressSpace) !u64 {
-    // Note: The guard page region (GUARD_PAGE_ADDR to USER_STACK_BOTTOM)
-    // is NOT mapped, so any stack overflow will trigger a page fault
-    return space.allocateRegion(
+    try vmm.mapRegionLazy(
+        space,
         USER_STACK_BOTTOM,
         USER_STACK_SIZE,
-        .{
-            .user = true,
-            .writable = true,
-            .executable = false,
-        },
+        .{ .read = true, .write = true, .user = true },
     );
+    return USER_STACK_BOTTOM;
 }
 
 /// Check if an address is in user space
@@ -220,16 +215,12 @@ pub fn validateUserBuffer(space: *vmm.AddressSpace, ptr: u64, len: u64, needs_wr
     const end = (ptr + len + 0xFFF) & ~@as(u64, 0xFFF); // Page-align up
 
     while (addr < end) : (addr += 0x1000) {
-        // Check if page is mapped
-        if (space.translate(addr) == null) {
+        // Page must be either currently mapped or covered by a tracked region
+        // (lazy region — backing page will be allocated on first access).
+        if (space.translate(addr) == null and space.findRegion(addr) == null) {
             return false;
         }
-
-        // For write access, check writable flag
-        if (needs_write) {
-            // In full implementation, would check page table flags
-            // For now, we trust the mapping
-        }
+        _ = needs_write;
     }
 
     return true;
