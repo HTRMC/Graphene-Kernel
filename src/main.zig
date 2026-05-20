@@ -247,6 +247,7 @@ export fn _start() callconv(.c) noreturn {
     var logger_proc: ?*process.Process = null;
     var devfs_proc: ?*process.Process = null;
     var virtioblk_proc: ?*process.Process = null;
+    var fatfs_proc: ?*process.Process = null;
     if (module_request.response) |mod_response| {
         const modules = mod_response.getModules();
         printInfo("Loading boot modules..."); // TODO: make sure this text doesnt overlap. the text Running in user mode!
@@ -295,6 +296,10 @@ export fn _start() callconv(.c) noreturn {
                 } else {
                     printInfo("Skipping virtioblk (no virtio-blk PCI device)");
                 }
+            } else if (strEql(module_name, "fatfs")) {
+                // Load fatfs as a filesystem service that reads /dev/vda.
+                fatfs_proc = loadUserProcessP(module, "fatfs");
+                if (fatfs_proc != null) printOk("Loaded: fatfs (FAT32 filesystem)");
             } else {
                 // Unknown module - try to load as generic driver
                 printInfo("Skipping unknown module");
@@ -313,7 +318,7 @@ export fn _start() callconv(.c) noreturn {
 
     // Wire LOG endpoint: logger gets HANDLE, shell gets SEND, at LOG_CAP_SLOT.
     if (logger_proc != null and shell_proc != null) {
-        if (wireServiceEndpoint(logger_proc.?, shell_proc.?, LOG_CAP_SLOT)) {
+        if (wireServiceEndpoint(logger_proc.?, shell_proc.?, LOG_CAP_SLOT) != null) {
             printOk("LOG endpoint wired (slot 2)");
         } else {
             printFail("LOG endpoint wire failed");
@@ -322,7 +327,7 @@ export fn _start() callconv(.c) noreturn {
 
     // Wire DEVFS endpoint: devfs gets HANDLE, shell gets SEND, at DEVFS_CAP_SLOT.
     if (devfs_proc != null and shell_proc != null) {
-        if (wireServiceEndpoint(devfs_proc.?, shell_proc.?, DEVFS_CAP_SLOT)) {
+        if (wireServiceEndpoint(devfs_proc.?, shell_proc.?, DEVFS_CAP_SLOT) != null) {
             printOk("DEVFS endpoint wired (slot 3)");
         } else {
             printFail("DEVFS endpoint wire failed");
@@ -330,11 +335,33 @@ export fn _start() callconv(.c) noreturn {
     }
 
     // Wire BLK endpoint: virtioblk gets HANDLE, devfs gets SEND, at BLK_CAP_SLOT.
+    // Save the endpoint so we can also grant fatfs a SEND cap on it.
+    var blk_endpoint: ?*ipc.Endpoint = null;
     if (virtioblk_proc != null and devfs_proc != null) {
-        if (wireServiceEndpoint(virtioblk_proc.?, devfs_proc.?, BLK_CAP_SLOT)) {
+        blk_endpoint = wireServiceEndpoint(virtioblk_proc.?, devfs_proc.?, BLK_CAP_SLOT);
+        if (blk_endpoint != null) {
             printOk("BLK endpoint wired (slot 4)");
         } else {
             printFail("BLK endpoint wire failed");
+        }
+    }
+
+    // Wire FATFS endpoint: fatfs gets HANDLE, shell gets SEND, at FATFS_CAP_SLOT.
+    if (fatfs_proc != null and shell_proc != null) {
+        if (wireServiceEndpoint(fatfs_proc.?, shell_proc.?, FATFS_CAP_SLOT) != null) {
+            printOk("FATFS endpoint wired (slot 5)");
+        } else {
+            printFail("FATFS endpoint wire failed");
+        }
+    }
+
+    // Grant fatfs a SEND cap on the existing BLK endpoint so it can
+    // read sectors from /dev/vda.
+    if (fatfs_proc != null and blk_endpoint != null) {
+        if (grantSendCap(fatfs_proc.?, blk_endpoint.?, BLK_CAP_SLOT)) {
+            printOk("BLK send cap granted to fatfs");
+        } else {
+            printFail("BLK send cap grant failed");
         }
     }
 
@@ -497,29 +524,41 @@ const VFS_CAP_SLOT: u32 = 1;
 const LOG_CAP_SLOT: u32 = 2;
 const DEVFS_CAP_SLOT: u32 = 3;
 const BLK_CAP_SLOT: u32 = 4;
+const FATFS_CAP_SLOT: u32 = 5;
 
 /// Create a VFS endpoint and inject the cap into ramfs (HANDLE) and shell (SEND).
 fn wireVfsEndpoint(ramfs: *process.Process, shell: *process.Process) bool {
-    return wireServiceEndpoint(ramfs, shell, VFS_CAP_SLOT);
+    return wireServiceEndpoint(ramfs, shell, VFS_CAP_SLOT) != null;
 }
 
 /// Create an IPC endpoint and give server HANDLE+SEND, client SEND+HANDLE
-/// at the same well-known slot in both cap tables.
-fn wireServiceEndpoint(server: *process.Process, client: *process.Process, slot: u32) bool {
-    const endpoint = ipc.createEndpoint() orelse return false;
+/// at the same well-known slot in both cap tables. Returns the endpoint
+/// pointer so additional clients can be attached via `grantSendCap`.
+fn wireServiceEndpoint(server: *process.Process, client: *process.Process, slot: u32) ?*ipc.Endpoint {
+    const endpoint = ipc.createEndpoint() orelse return null;
 
-    const server_table = server.cap_table orelse return false;
-    const client_table = client.cap_table orelse return false;
+    const server_table = server.cap_table orelse return null;
+    const client_table = client.cap_table orelse return null;
 
     const server_rights = capability.Rights{ .handle = true, .send = true };
-    capability.insertAt(server_table, slot, &endpoint.base, server_rights) catch return false;
+    capability.insertAt(server_table, slot, &endpoint.base, server_rights) catch return null;
 
     const client_rights = capability.Rights{ .send = true, .handle = true };
     capability.insertAt(client_table, slot, &endpoint.base, client_rights) catch {
         capability.delete(server_table, slot);
-        return false;
+        return null;
     };
 
+    return endpoint;
+}
+
+/// Add a SEND-only capability for an existing endpoint to another
+/// process's cap table at `slot`. Used to attach extra clients (e.g.
+/// fatfs as a second BLK client alongside devfs).
+fn grantSendCap(proc: *process.Process, endpoint: *ipc.Endpoint, slot: u32) bool {
+    const tbl = proc.cap_table orelse return false;
+    const rights = capability.Rights{ .send = true };
+    capability.insertAt(tbl, slot, &endpoint.base, rights) catch return false;
     return true;
 }
 

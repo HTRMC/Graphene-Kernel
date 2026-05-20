@@ -17,9 +17,14 @@ pub const MAX_NAME_LEN: usize = 64;
 pub const MAX_MSG_DATA: usize = 256;
 
 /// Well-known capability slot for the block-device service (virtio-blk).
-/// Server (virtioblk) gets HANDLE rights; devfs gets SEND rights so it
-/// can forward /dev/vda reads/writes.
+/// Server (virtioblk) gets HANDLE rights; clients (devfs, fatfs) get
+/// SEND rights so they can forward read/write requests.
 pub const BLK_CAP_SLOT: u32 = 4;
+
+/// Well-known capability slot for the FAT32 filesystem service.
+/// Server (fatfs) gets HANDLE rights; shell gets SEND rights so it
+/// can forward /mnt/... path requests.
+pub const FATFS_CAP_SLOT: u32 = 5;
 
 /// Filesystem operation codes
 pub const FsOp = enum(u8) {

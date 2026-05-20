@@ -370,6 +370,44 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(virtioblk);
 
     // ========================================
+    // User space: fatfs (FAT32 filesystem) service
+    // ========================================
+    const fatfs_main_module = b.createModule(.{
+        .root_source_file = b.path("user/services/fatfs/main.zig"),
+        .target = user_target,
+        .optimize = .ReleaseSafe,
+        .strip = true,
+        .imports = &.{
+            .{ .name = "syscall", .module = syscall_module },
+            .{ .name = "vfs", .module = vfs_module },
+            .{ .name = "blk", .module = blk_module },
+        },
+    });
+
+    const fatfs_module = b.createModule(.{
+        .root_source_file = b.path("user/lib/start.zig"),
+        .target = user_target,
+        .optimize = .ReleaseSafe,
+        .strip = true,
+        .unwind_tables = .none,
+        .imports = &.{
+            .{ .name = "syscall", .module = syscall_module },
+            .{ .name = "main", .module = fatfs_main_module },
+        },
+    });
+
+    fatfs_module.red_zone = false;
+
+    const fatfs = b.addExecutable(.{
+        .name = "fatfs",
+        .root_module = fatfs_module,
+    });
+
+    fatfs.setLinkerScript(b.path("user/linker-user.ld"));
+
+    b.installArtifact(fatfs);
+
+    // ========================================
     // Build ISO step
     // ========================================
     const iso_cmd = b.addSystemCommand(&.{

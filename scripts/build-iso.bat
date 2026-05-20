@@ -71,6 +71,12 @@ if exist "zig-out\bin\virtioblk" (
     echo Copied virtio-blk driver to ISO
 )
 
+:: Copy fatfs service (if it exists)
+if exist "zig-out\bin\fatfs" (
+    copy "zig-out\bin\fatfs" "%ISO_ROOT%\boot\fatfs"
+    echo Copied fatfs service to ISO
+)
+
 :: Copy Limine config
 copy "limine.conf" "%ISO_ROOT%\boot\limine\limine.conf"
 

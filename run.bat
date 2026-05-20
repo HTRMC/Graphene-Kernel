@@ -41,14 +41,41 @@ if exist "ovmf\OVMF.fd" (
     echo OVMF firmware installed successfully!
 )
 
-:: Ensure a 16 MiB virtio-blk backing image exists for QEMU
+:: Ensure a 64 MiB FAT32 virtio-blk image with seed files. FAT32 wants
+:: a minimum of ~65k clusters; 64 MiB at default cluster size satisfies
+:: that comfortably.
 if not exist "disk.img" (
-    echo Creating 16 MiB disk.img for virtio-blk...
-    fsutil file createnew disk.img 16777216 >nul
+    echo Creating 64 MiB FAT32 disk.img for virtio-blk...
+    fsutil file createnew disk.img 67108864 >nul
     if errorlevel 1 (
         echo Failed to create disk.img
         exit /b 1
     )
+
+    set "MKFS=C:\msys64\usr\bin\mkfs.fat.exe"
+    set "MCOPY=C:\msys64\mingw64\bin\mcopy.exe"
+    if not exist "!MKFS!" (
+        echo mkfs.fat not found at !MKFS! - install MSYS2 dosfstools
+        exit /b 1
+    )
+    if not exist "!MCOPY!" (
+        echo mcopy not found at !MCOPY! - install MSYS2 mingw-w64-x86_64-mtools
+        exit /b 1
+    )
+
+    "!MKFS!" -F 32 -n GRAPHENE disk.img >nul
+    if errorlevel 1 (
+        echo mkfs.fat failed
+        exit /b 1
+    )
+
+    > _hello.txt echo Hello from FAT32 on /dev/vda!
+    > _readme.txt echo Graphene FAT32 readme. The bytes you are reading came off the disk.
+    "!MCOPY!" -i disk.img _hello.txt ::/HELLO.TXT >nul
+    "!MCOPY!" -i disk.img _readme.txt ::/README.TXT >nul
+    del _hello.txt _readme.txt 2>nul
+
+    echo Created 64 MiB FAT32 disk.img with HELLO.TXT and README.TXT
 )
 
 :: Make sure qemu-system-x86_64 is reachable. winget and MSYS2 install to

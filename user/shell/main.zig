@@ -35,12 +35,17 @@ fn startsWith(str: []const u8, prefix: []const u8) bool {
 
 const DEV_PREFIX = "/dev/";
 const DEV_ROOT = "/dev";
+const MNT_PREFIX = "/mnt/";
+const MNT_ROOT = "/mnt";
 
 /// Route a path to (capability slot, server-relative name).
-/// `/dev/foo` -> (devfs, "foo"); everything else -> (ramfs, path as-is).
+/// `/dev/foo` -> devfs, `/mnt/foo` -> fatfs; everything else -> ramfs.
 fn routePath(path: []const u8) struct { slot: u32, name: []const u8 } {
     if (startsWith(path, DEV_PREFIX)) {
         return .{ .slot = vfs.DEVFS_CAP_SLOT, .name = path[DEV_PREFIX.len..] };
+    }
+    if (startsWith(path, MNT_PREFIX)) {
+        return .{ .slot = vfs.FATFS_CAP_SLOT, .name = path[MNT_PREFIX.len..] };
     }
     return .{ .slot = vfs.VFS_CAP_SLOT, .name = path };
 }
@@ -110,14 +115,13 @@ fn printFsError(err: vfs.FsError) void {
 }
 
 fn cmdLs(args: []const u8) void {
-    // Default to ramfs root; `/dev` or `/dev/` routes to devfs root.
+    // Default to ramfs root; /dev routes to devfs, /mnt routes to fatfs.
     var slot: u32 = vfs.VFS_CAP_SLOT;
     if (args.len > 0) {
-        if (strEql(args, DEV_ROOT) or strEql(args, DEV_PREFIX)) {
+        if (strEql(args, DEV_ROOT) or strEql(args, DEV_PREFIX) or startsWith(args, DEV_PREFIX)) {
             slot = vfs.DEVFS_CAP_SLOT;
-        } else if (startsWith(args, DEV_PREFIX)) {
-            // Subdirs of /dev not supported (flat devfs).
-            slot = vfs.DEVFS_CAP_SLOT;
+        } else if (strEql(args, MNT_ROOT) or strEql(args, MNT_PREFIX) or startsWith(args, MNT_PREFIX)) {
+            slot = vfs.FATFS_CAP_SLOT;
         }
     }
 
