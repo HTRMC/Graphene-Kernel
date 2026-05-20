@@ -41,6 +41,29 @@ if exist "ovmf\OVMF.fd" (
     echo OVMF firmware installed successfully!
 )
 
+:: Ensure a 16 MiB virtio-blk backing image exists for QEMU
+if not exist "disk.img" (
+    echo Creating 16 MiB disk.img for virtio-blk...
+    fsutil file createnew disk.img 16777216 >nul
+    if errorlevel 1 (
+        echo Failed to create disk.img
+        exit /b 1
+    )
+)
+
+:: Make sure qemu-system-x86_64 is reachable. winget and MSYS2 install to
+:: different prefixes and neither always updates PATH for fresh shells.
+where qemu-system-x86_64 >nul 2>&1
+if errorlevel 1 (
+    if exist "C:\Program Files\qemu\qemu-system-x86_64.exe" (
+        set "PATH=C:\Program Files\qemu;%PATH%"
+    ) else if exist "C:\msys64\mingw64\bin\qemu-system-x86_64.exe" (
+        set "PATH=C:\msys64\mingw64\bin;%PATH%"
+    ) else if exist "C:\msys64\ucrt64\bin\qemu-system-x86_64.exe" (
+        set "PATH=C:\msys64\ucrt64\bin;%PATH%"
+    )
+)
+
 :: Run the kernel build
 echo.
 echo Building Graphene Kernel...

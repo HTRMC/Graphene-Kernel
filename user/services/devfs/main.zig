@@ -8,11 +8,13 @@
 
 const syscall = @import("syscall");
 const vfs = @import("vfs");
+const blk = @import("blk");
 
 const DevKind = enum(u8) {
     null_dev = 1,
     zero_dev = 2,
     console_dev = 3,
+    vda_dev = 4,
 };
 
 const DevFile = struct {
@@ -24,7 +26,51 @@ const devices = [_]DevFile{
     .{ .name = "null", .kind = .null_dev },
     .{ .name = "zero", .kind = .zero_dev },
     .{ .name = "console", .kind = .console_dev },
+    .{ .name = "vda", .kind = .vda_dev },
 };
+
+/// Ask the virtio-blk service for the disk's capacity in 512-byte
+/// sectors. Returns 0 if the BLK service is not available.
+fn blkCapacity() u64 {
+    var req_buf: [@sizeOf(blk.BlkRequest)]u8 = undefined;
+    var reply_buf: [@sizeOf(blk.BlkResponse) + 8]u8 = undefined;
+    const req_len = blk.buildCapacityRequest(&req_buf);
+    if (req_len == 0) return 0;
+    const r = blk.callSlot(vfs.BLK_CAP_SLOT, req_buf[0..req_len], &reply_buf);
+    if (r.err != .success or r.payload.len < 8) return 0;
+    const cap: *const u64 = @ptrCast(@alignCast(r.payload.ptr));
+    return cap.*;
+}
+
+/// Read up to `want` bytes from (sector, byte_offset) into `dst`.
+/// Returns the number of bytes actually written.
+fn blkReadChunk(sector: u64, byte_offset: u32, want: u32, dst: []u8) u32 {
+    var req_buf: [@sizeOf(blk.BlkRequest)]u8 = undefined;
+    var reply_buf: [@sizeOf(blk.BlkResponse) + blk.MAX_CHUNK]u8 = undefined;
+    const max = @min(@min(want, @as(u32, blk.MAX_CHUNK)), @as(u32, @intCast(dst.len)));
+    if (max == 0) return 0;
+    const req_len = blk.buildReadRequest(&req_buf, sector, byte_offset, max);
+    if (req_len == 0) return 0;
+    const r = blk.callSlot(vfs.BLK_CAP_SLOT, req_buf[0..req_len], &reply_buf);
+    if (r.err != .success) return 0;
+    const n: u32 = @intCast(r.payload.len);
+    for (0..n) |i| dst[i] = r.payload[i];
+    return n;
+}
+
+/// Write a chunk of bytes to (sector, byte_offset). Returns the number
+/// of bytes the device acknowledged (0 on error).
+fn blkWriteChunk(sector: u64, byte_offset: u32, data: []const u8) u32 {
+    if (data.len == 0 or data.len > blk.MAX_CHUNK) return 0;
+    var req_buf: [@sizeOf(blk.BlkRequest) + blk.MAX_CHUNK]u8 = undefined;
+    var reply_buf: [@sizeOf(blk.BlkResponse)]u8 = undefined;
+    const req_len = blk.buildWriteRequest(&req_buf, sector, byte_offset, data);
+    if (req_len == 0) return 0;
+    const r = blk.callSlot(vfs.BLK_CAP_SLOT, req_buf[0..req_len], &reply_buf);
+    if (r.err != .success) return 0;
+    const hdr: *const blk.BlkResponse = @ptrCast(@alignCast(reply_buf[0..].ptr));
+    return hdr.size;
+}
 
 fn strEql(a: []const u8, b: []const u8) bool {
     if (a.len != b.len) return false;
@@ -80,11 +126,14 @@ fn handleRequest(req_data: []const u8, resp_data: []u8) usize {
             return hdr_sz;
         },
         .stat => {
-            if (findDev(name) != null) {
+            if (findDev(name)) |kind| {
                 resp.* = .{ .error_code = 0, .size = @sizeOf(vfs.FileStat) };
                 if (resp_payload.len >= @sizeOf(vfs.FileStat)) {
                     const stat: *vfs.FileStat = @ptrCast(@alignCast(resp_payload.ptr));
-                    stat.size = 0;
+                    stat.size = if (kind == .vda_dev) blk: {
+                        const total = blkCapacity() *% blk.SECTOR_SIZE;
+                        break :blk if (total > 0xFFFFFFFF) 0xFFFFFFFF else @intCast(total);
+                    } else 0;
                     stat.file_type = @intFromEnum(vfs.FileType.regular);
                     stat._pad = .{ 0, 0, 0 };
                 }
@@ -128,6 +177,18 @@ fn handleRequest(req_data: []const u8, resp_data: []u8) usize {
                     resp.* = .{ .error_code = 0, .size = max_read };
                     return hdr_sz + max_read;
                 },
+                .vda_dev => {
+                    // Translate (offset, size) into a single chunk read
+                    // bounded by sector and IPC chunk limits. Callers
+                    // can loop to read more.
+                    const sector = @as(u64, req.offset) / blk.SECTOR_SIZE;
+                    const byte_off: u32 = @intCast(@as(u64, req.offset) % blk.SECTOR_SIZE);
+                    const sector_remaining: u32 = @as(u32, blk.SECTOR_SIZE) - byte_off;
+                    const want = @min(@min(req.size, sector_remaining), @as(u32, @intCast(resp_payload.len)));
+                    const got = blkReadChunk(sector, byte_off, want, resp_payload);
+                    resp.* = .{ .error_code = 0, .size = got };
+                    return hdr_sz + got;
+                },
             }
         },
         .write => {
@@ -146,6 +207,23 @@ fn handleRequest(req_data: []const u8, resp_data: []u8) usize {
                         _ = syscall.debugPrint(data);
                     }
                     resp.* = .{ .error_code = 0, .size = @intCast(data.len) };
+                    return hdr_sz;
+                },
+                .vda_dev => {
+                    if (data.len == 0) {
+                        resp.* = .{ .error_code = 0, .size = 0 };
+                        return hdr_sz;
+                    }
+                    const sector = @as(u64, req.offset) / blk.SECTOR_SIZE;
+                    const byte_off: u32 = @intCast(@as(u64, req.offset) % blk.SECTOR_SIZE);
+                    const sector_remaining: u32 = @as(u32, blk.SECTOR_SIZE) - byte_off;
+                    const want = @min(@min(@as(u32, @intCast(data.len)), sector_remaining), @as(u32, blk.MAX_CHUNK));
+                    const wrote = blkWriteChunk(sector, byte_off, data[0..want]);
+                    if (wrote == 0) {
+                        resp.* = .{ .error_code = @intFromEnum(vfs.FsError.io_error), .size = 0 };
+                        return hdr_sz;
+                    }
+                    resp.* = .{ .error_code = 0, .size = wrote };
                     return hdr_sz;
                 },
             }

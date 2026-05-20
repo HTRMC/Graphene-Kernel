@@ -89,6 +89,17 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // Shared block-device protocol module (depends on syscall)
+    const blk_module = b.createModule(.{
+        .root_source_file = b.path("user/lib/blk.zig"),
+        .target = user_target,
+        .optimize = .ReleaseSafe,
+        .strip = true,
+        .imports = &.{
+            .{ .name = "syscall", .module = syscall_module },
+        },
+    });
+
     // Init process module (start.zig is root, calls main from init)
     const init_main_module = b.createModule(.{
         .root_source_file = b.path("user/init/main.zig"),
@@ -294,6 +305,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "syscall", .module = syscall_module },
             .{ .name = "vfs", .module = vfs_module },
+            .{ .name = "blk", .module = blk_module },
         },
     });
 
@@ -321,6 +333,43 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(devfs);
 
     // ========================================
+    // User space: virtio-blk driver service
+    // ========================================
+    const virtioblk_main_module = b.createModule(.{
+        .root_source_file = b.path("user/services/virtioblk/main.zig"),
+        .target = user_target,
+        .optimize = .ReleaseSafe,
+        .strip = true,
+        .imports = &.{
+            .{ .name = "syscall", .module = syscall_module },
+            .{ .name = "blk", .module = blk_module },
+        },
+    });
+
+    const virtioblk_module = b.createModule(.{
+        .root_source_file = b.path("user/lib/start.zig"),
+        .target = user_target,
+        .optimize = .ReleaseSafe,
+        .strip = true,
+        .unwind_tables = .none,
+        .imports = &.{
+            .{ .name = "syscall", .module = syscall_module },
+            .{ .name = "main", .module = virtioblk_main_module },
+        },
+    });
+
+    virtioblk_module.red_zone = false;
+
+    const virtioblk = b.addExecutable(.{
+        .name = "virtioblk",
+        .root_module = virtioblk_module,
+    });
+
+    virtioblk.setLinkerScript(b.path("user/linker-user.ld"));
+
+    b.installArtifact(virtioblk);
+
+    // ========================================
     // Build ISO step
     // ========================================
     const iso_cmd = b.addSystemCommand(&.{
@@ -331,7 +380,8 @@ pub fn build(b: *std.Build) void {
     const iso_step = b.step("iso", "Build bootable ISO image");
     iso_step.dependOn(&iso_cmd.step);
 
-    // Run in QEMU step
+    // Run in QEMU step. virtio-blk-pci is attached so PCI enumeration
+    // can find it; the backing file is created by ensureDiskImage above.
     const qemu_cmd = b.addSystemCommand(&.{
         "qemu-system-x86_64",
         "-M", "q35",
@@ -340,6 +390,8 @@ pub fn build(b: *std.Build) void {
         "-bios", "ovmf/OVMF.fd",
         "-cdrom", "zig-out/graphene.iso",
         "-boot", "d",
+        "-drive", "file=disk.img,if=none,id=blk0,format=raw",
+        "-device", "virtio-blk-pci,drive=blk0",
     });
     qemu_cmd.step.dependOn(iso_step);
 

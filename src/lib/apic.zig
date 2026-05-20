@@ -210,9 +210,13 @@ pub fn init() bool {
     // Set task priority to 0 (accept all interrupts)
     writeReg(APIC_REG.TPR, 0);
 
-    // Mask all LVT entries initially
+    // Mask LVT entries we don't use, but leave LINT0 in ExtINT mode so
+    // the legacy 8259 PIC's INTR line can still reach the CPU. Without
+    // this, PIC-routed IRQs (e.g. keyboard on IRQ 1) silently dry up
+    // once the APIC is enabled.
     writeReg(APIC_REG.LVT_TIMER, LVT_MASKED);
-    writeReg(APIC_REG.LVT_LINT0, LVT_MASKED);
+    // Delivery mode 7 (ExtINT) << 8 = 0x700; bit 16 (mask) cleared.
+    writeReg(APIC_REG.LVT_LINT0, 0x700);
     writeReg(APIC_REG.LVT_LINT1, LVT_MASKED);
     writeReg(APIC_REG.LVT_ERROR, LVT_MASKED);
 

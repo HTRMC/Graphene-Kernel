@@ -7,6 +7,7 @@ const process = @import("process.zig");
 const thread = @import("thread.zig");
 const pic = @import("pic.zig");
 const framebuffer = @import("framebuffer.zig");
+const pci = @import("pci.zig");
 
 /// Maximum number of registered drivers
 const MAX_DRIVERS: usize = 32;
@@ -48,6 +49,10 @@ pub const DriverEntry = struct {
 
     /// I/O port capability slot in driver's cap table
     ioport_cap_slot: ?capability.CapSlot = null,
+
+    /// MMIO capability slot in driver's cap table (for PCI drivers
+    /// granted a memory-mapped BAR as a MemoryObject cap).
+    mmio_cap_slot: ?capability.CapSlot = null,
 
     /// Is this entry in use?
     in_use: bool = false,
@@ -195,6 +200,96 @@ fn grantHardwareCapabilities(entry: *DriverEntry) bool {
     return true;
 }
 
+/// Register a PCI driver: grants the driver process capabilities for the
+/// device's IRQ line, first MMIO BAR (as a device-MemoryObject cap), and
+/// first I/O port BAR. All grants are best-effort; any BAR or IRQ the
+/// device doesn't expose is simply skipped.
+pub fn registerPciDriver(
+    name: []const u8,
+    driver_type: DriverType,
+    proc: *process.Process,
+    pci_dev: *const pci.Device,
+) ?*DriverEntry {
+    if (!initialized) return null;
+
+    // Find a free entry first; bail before touching cap_table if registry full.
+    var slot_entry: ?*DriverEntry = null;
+    for (&drivers) |*entry| {
+        if (!entry.in_use) {
+            slot_entry = entry;
+            break;
+        }
+    }
+    const entry = slot_entry orelse return null;
+
+    const cap_table = proc.cap_table orelse return null;
+
+    entry.setName(name);
+    entry.driver_type = driver_type;
+    entry.proc = proc;
+    entry.irq = if (pci_dev.irq_line != 0xFF) pci_dev.irq_line else null;
+    entry.in_use = true;
+    driver_count += 1;
+
+    // IRQ grant (skip if device has no usable IRQ line).
+    if (entry.irq) |irq_num| {
+        if (object.createIrqObject(irq_num)) |irq_obj| {
+            if (cap_table.findFreeSlot()) |slot| {
+                capability.insertAt(cap_table, slot, &irq_obj.base, capability.Rights.ALL) catch {
+                    object.freeIrqObject(irq_obj);
+                };
+                if (cap_table.isSlotUsed(slot)) {
+                    entry.irq_cap_slot = slot;
+                    pic.unmaskIrq(irq_num);
+                }
+            } else {
+                object.freeIrqObject(irq_obj);
+            }
+        }
+    }
+
+    // MMIO BAR grant — first MMIO BAR only for now.
+    if (pci_dev.mmioBar()) |bar| {
+        entry.io_port_start = null;
+        if (object.createMmioMemoryObject(bar.base, bar.size)) |mem_obj| {
+            if (cap_table.findFreeSlot()) |slot| {
+                capability.insertAt(cap_table, slot, &mem_obj.base, capability.Rights.RW) catch {
+                    object.freeMemoryObject(mem_obj);
+                };
+                if (cap_table.isSlotUsed(slot)) {
+                    entry.mmio_cap_slot = slot;
+                }
+            } else {
+                object.freeMemoryObject(mem_obj);
+            }
+        }
+    }
+
+    // I/O port BAR grant — first I/O BAR only for now.
+    if (pci_dev.ioBar()) |bar| {
+        const port_start: u16 = @truncate(bar.base);
+        const port_count: u16 = @truncate(bar.size);
+        if (port_count > 0) {
+            entry.io_port_start = port_start;
+            entry.io_port_count = port_count;
+            if (object.createIoPortObject(port_start, port_count)) |ioport_obj| {
+                if (cap_table.findFreeSlot()) |slot| {
+                    capability.insertAt(cap_table, slot, &ioport_obj.base, capability.Rights.RW) catch {
+                        object.freeIoPortObject(ioport_obj);
+                    };
+                    if (cap_table.isSlotUsed(slot)) {
+                        entry.ioport_cap_slot = slot;
+                    }
+                } else {
+                    object.freeIoPortObject(ioport_obj);
+                }
+            }
+        }
+    }
+
+    return entry;
+}
+
 /// Unregister a driver
 pub fn unregisterDriver(entry: *DriverEntry) void {
     if (!entry.in_use) return;
@@ -206,6 +301,9 @@ pub fn unregisterDriver(entry: *DriverEntry) void {
                 capability.delete(cap_table, slot);
             }
             if (entry.ioport_cap_slot) |slot| {
+                capability.delete(cap_table, slot);
+            }
+            if (entry.mmio_cap_slot) |slot| {
                 capability.delete(cap_table, slot);
             }
         }

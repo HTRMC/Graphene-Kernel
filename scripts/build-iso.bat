@@ -65,6 +65,12 @@ if exist "zig-out\bin\devfs" (
     echo Copied devfs service to ISO
 )
 
+:: Copy virtio-blk driver (if it exists)
+if exist "zig-out\bin\virtioblk" (
+    copy "zig-out\bin\virtioblk" "%ISO_ROOT%\boot\virtioblk"
+    echo Copied virtio-blk driver to ISO
+)
+
 :: Copy Limine config
 copy "limine.conf" "%ISO_ROOT%\boot\limine\limine.conf"
 

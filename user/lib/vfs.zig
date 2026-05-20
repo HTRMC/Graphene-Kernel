@@ -16,6 +16,11 @@ pub const MAX_NAME_LEN: usize = 64;
 /// Maximum inline data per message (matches kernel ipc.MAX_INLINE_DATA = 256)
 pub const MAX_MSG_DATA: usize = 256;
 
+/// Well-known capability slot for the block-device service (virtio-blk).
+/// Server (virtioblk) gets HANDLE rights; devfs gets SEND rights so it
+/// can forward /dev/vda reads/writes.
+pub const BLK_CAP_SLOT: u32 = 4;
+
 /// Filesystem operation codes
 pub const FsOp = enum(u8) {
     open = 1,

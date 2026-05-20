@@ -40,6 +40,7 @@ const serial = @import("lib/serial.zig");
 const apic = @import("lib/apic.zig");
 const ipc = @import("lib/ipc.zig");
 const capability = @import("lib/capability.zig");
+const pci = @import("lib/pci.zig");
 
 /// Debug logging - only enabled in Debug builds
 const debug_enabled = builtin.mode == .Debug;
@@ -190,6 +191,15 @@ export fn _start() callconv(.c) noreturn {
     vmm.init();
     printOk("Virtual Memory Manager");
 
+    // Enumerate PCI bus 0 — needed to locate virtio-blk and other devices
+    // before any driver process is loaded.
+    pci.init();
+    if (pci.findVirtioBlk() != null) {
+        printOk("PCI bus enumerated (virtio-blk present)");
+    } else {
+        printOk("PCI bus enumerated");
+    }
+
     // Try to initialize APIC (modern interrupt controller)
     // Must be after PMM init since APIC uses physToVirt for MMIO mapping
     if (apic.init()) {
@@ -236,6 +246,7 @@ export fn _start() callconv(.c) noreturn {
     var shell_proc: ?*process.Process = null;
     var logger_proc: ?*process.Process = null;
     var devfs_proc: ?*process.Process = null;
+    var virtioblk_proc: ?*process.Process = null;
     if (module_request.response) |mod_response| {
         const modules = mod_response.getModules();
         printInfo("Loading boot modules..."); // TODO: make sure this text doesnt overlap. the text Running in user mode!
@@ -270,6 +281,20 @@ export fn _start() callconv(.c) noreturn {
                 // Load devfs as a device filesystem service
                 devfs_proc = loadUserProcessP(module, "devfs");
                 if (devfs_proc != null) printOk("Loaded: devfs (device filesystem)");
+            } else if (strEql(module_name, "virtioblk")) {
+                // Load virtio-blk as a PCI driver bound to the device discovered
+                // by pci.findVirtioBlk(). Skip silently if no device present.
+                if (pci.findVirtioBlk()) |pci_dev| {
+                    virtioblk_proc = loadPciDriverProcess(
+                        module,
+                        "virtioblk",
+                        driver.DriverType.storage,
+                        pci_dev,
+                    );
+                    if (virtioblk_proc != null) printOk("Loaded: virtioblk (PCI block driver)");
+                } else {
+                    printInfo("Skipping virtioblk (no virtio-blk PCI device)");
+                }
             } else {
                 // Unknown module - try to load as generic driver
                 printInfo("Skipping unknown module");
@@ -301,6 +326,15 @@ export fn _start() callconv(.c) noreturn {
             printOk("DEVFS endpoint wired (slot 3)");
         } else {
             printFail("DEVFS endpoint wire failed");
+        }
+    }
+
+    // Wire BLK endpoint: virtioblk gets HANDLE, devfs gets SEND, at BLK_CAP_SLOT.
+    if (virtioblk_proc != null and devfs_proc != null) {
+        if (wireServiceEndpoint(virtioblk_proc.?, devfs_proc.?, BLK_CAP_SLOT)) {
+            printOk("BLK endpoint wired (slot 4)");
+        } else {
+            printFail("BLK endpoint wire failed");
         }
     }
 
@@ -458,10 +492,11 @@ fn strEql(a: []const u8, b: []const u8) bool {
 }
 
 /// Well-known capability slots for user-space service endpoints.
-/// Must match the constants in user/lib/vfs.zig and user/lib/log.zig.
+/// Must match the constants in user/lib/vfs.zig, user/lib/log.zig, and user/lib/blk.zig.
 const VFS_CAP_SLOT: u32 = 1;
 const LOG_CAP_SLOT: u32 = 2;
 const DEVFS_CAP_SLOT: u32 = 3;
+const BLK_CAP_SLOT: u32 = 4;
 
 /// Create a VFS endpoint and inject the cap into ramfs (HANDLE) and shell (SEND).
 fn wireVfsEndpoint(ramfs: *process.Process, shell: *process.Process) bool {
@@ -596,6 +631,75 @@ fn loadUserProcess(module: *limine.File, name: []const u8) bool {
     scheduler.enqueue(user_thread);
 
     return true;
+}
+
+/// Load a PCI driver process: ELF → driver_process → registerPciDriver
+/// (which grants IRQ + MMIO BAR + I/O port caps from the discovered PCI device).
+fn loadPciDriverProcess(
+    module: *limine.File,
+    name: []const u8,
+    driver_type: driver.DriverType,
+    pci_dev: *const pci.Device,
+) ?*process.Process {
+    const module_addr: u64 = @intFromPtr(module.address);
+    const module_size = module.size;
+
+    if (module_size == 0) {
+        printFail("PCI driver module is empty");
+        return null;
+    }
+
+    const module_data: [*]const u8 = @ptrFromInt(module_addr);
+    const data_slice = module_data[0..module_size];
+
+    if (!elf.isElf(data_slice)) {
+        printFail("PCI driver module is not a valid ELF");
+        return null;
+    }
+
+    const drv_proc = process.create(null) orelse {
+        printFail("Failed to create PCI driver process");
+        return null;
+    };
+
+    drv_proc.setName(name);
+    drv_proc.flags.driver_process = true;
+
+    const space = drv_proc.address_space orelse {
+        printFail("PCI driver process has no address space");
+        process.destroy(drv_proc);
+        return null;
+    };
+
+    const load_result = elf.load(space, data_slice) catch {
+        printFail("Failed to load PCI driver ELF");
+        process.destroy(drv_proc);
+        return null;
+    };
+
+    _ = usermode.allocateUserStack(space) catch {
+        printFail("Failed to allocate PCI driver stack");
+        process.destroy(drv_proc);
+        return null;
+    };
+
+    const drv_thread = thread.createUser(drv_proc, load_result.entry_point, usermode.USER_STACK_TOP - 8) orelse {
+        printFail("Failed to create PCI driver thread");
+        process.destroy(drv_proc);
+        return null;
+    };
+
+    _ = drv_proc.addThread(drv_thread);
+
+    const entry = driver.registerPciDriver(name, driver_type, drv_proc, pci_dev);
+    if (entry == null) {
+        printFail("Failed to register PCI driver");
+        process.destroy(drv_proc);
+        return null;
+    }
+
+    scheduler.enqueue(drv_thread);
+    return drv_proc;
 }
 
 /// Load a driver process from boot module and register it with the driver framework

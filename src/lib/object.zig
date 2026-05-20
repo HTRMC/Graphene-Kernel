@@ -275,6 +275,36 @@ pub fn freeIrqObject(irq_obj: *IrqObject) void {
     }
 }
 
+/// Memory object pool (used for MMIO BAR objects handed to drivers, and
+/// any other physically-anchored memory regions exposed as capabilities).
+const MAX_MEMORY_OBJECTS: usize = 32;
+var memory_object_pool: [MAX_MEMORY_OBJECTS]MemoryObject = undefined;
+var memory_object_used: [MAX_MEMORY_OBJECTS]bool = [_]bool{false} ** MAX_MEMORY_OBJECTS;
+
+/// Create a MemoryObject for a device-MMIO region (cache-disabled, DMA-capable).
+pub fn createMmioMemoryObject(phys_start: u64, size: u64) ?*MemoryObject {
+    for (&memory_object_used, 0..) |*used, i| {
+        if (!used.*) {
+            used.* = true;
+            memory_object_pool[i] = MemoryObject.init(phys_start, size, .{
+                .device = true,
+                .dma = true,
+                .contiguous = true,
+            });
+            return &memory_object_pool[i];
+        }
+    }
+    return null;
+}
+
+/// Free a MemoryObject back to the pool.
+pub fn freeMemoryObject(mem_obj: *MemoryObject) void {
+    const index = (@intFromPtr(mem_obj) - @intFromPtr(&memory_object_pool)) / @sizeOf(MemoryObject);
+    if (index < MAX_MEMORY_OBJECTS) {
+        memory_object_used[index] = false;
+    }
+}
+
 /// I/O port object pool
 const MAX_IOPORT_OBJECTS: usize = 32;
 var ioport_object_pool: [MAX_IOPORT_OBJECTS]IoPortObject = undefined;

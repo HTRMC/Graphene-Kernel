@@ -31,6 +31,7 @@ pub const SyscallNumber = enum(u64) {
     process_list = 25,
     mem_info = 26,
     uptime = 27,
+    dma_alloc = 28,
 };
 
 /// Syscall error codes
@@ -358,4 +359,37 @@ pub fn memInfo(result: *MemInfoResult) i64 {
 /// Returns tick count on success
 pub fn uptime() i64 {
     return syscall0(@intFromEnum(SyscallNumber.uptime));
+}
+
+/// Driver-only: allocate `size` bytes (rounded up to a page) of
+/// physically-contiguous memory, map it user-RW at `vaddr`, and return
+/// the physical base address (so the driver can program it into a
+/// device). Negative return = error.
+pub fn dmaAlloc(vaddr: u64, size: u64) i64 {
+    return syscall2(
+        @intFromEnum(SyscallNumber.dma_alloc),
+        vaddr,
+        size,
+    );
+}
+
+/// Type-specific cap information. `addr` and `size` carry phys base +
+/// size for memory/MMIO caps, port base + count for I/O ports, IRQ
+/// number + 0 for IRQ caps.
+pub const CapInfoResult = extern struct {
+    object_type: u8,
+    rights: u8,
+    _pad: [6]u8 = .{ 0, 0, 0, 0, 0, 0 },
+    addr: u64 = 0,
+    size: u64 = 0,
+};
+
+/// Query a capability for type and resource metadata. Returns 0 on
+/// success, negative on error.
+pub fn capInfo(slot: u32, result: *CapInfoResult) i64 {
+    return syscall2(
+        @intFromEnum(SyscallNumber.cap_info),
+        slot,
+        @intFromPtr(result),
+    );
 }

@@ -114,6 +114,11 @@ pub fn unmaskIrq(irq: u8) void {
     } else {
         port = PIC2_DATA;
         irq_line = irq - 8;
+
+        // The slave PIC is wired to master IRQ 2 (cascade). If we leave
+        // that line masked, no slave IRQ (8-15) ever reaches the CPU.
+        const m1 = inb(PIC1_DATA) & ~@as(u8, 1 << 2);
+        outb(PIC1_DATA, m1);
     }
 
     const value = inb(port) & ~(@as(u8, 1) << @intCast(irq_line));

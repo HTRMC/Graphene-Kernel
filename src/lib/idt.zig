@@ -500,8 +500,16 @@ fn handleIrq(frame: *InterruptFrame) void {
         },
     }
 
-    // Send End-Of-Interrupt
+    // Send End-Of-Interrupt. With APIC enabled and LINT0 in ExtINT
+    // mode, PIC-routed IRQs need EOI sent to BOTH the 8259 (to clear
+    // its ISR so the next IRQ can fire) and the LAPIC (to clear the
+    // in-service state for LINT0). The APIC timer at vector 32 is
+    // LAPIC-only and only needs the APIC EOI.
     if (apic.isEnabled()) {
+        if (irq != 0) {
+            // PIC-routed IRQ — EOI the PIC first.
+            pic.sendEoi(irq);
+        }
         apic.sendEoi();
     } else {
         pic.sendEoi(irq);

@@ -47,6 +47,7 @@ pub const SyscallNumber = enum(u64) {
     process_list = 25, // Get list of process info
     mem_info = 26, // Get memory statistics
     uptime = 27, // Get system uptime in ticks
+    dma_alloc = 28, // Driver-only: allocate contiguous DMA buffer
     _,
 };
 
@@ -72,6 +73,17 @@ pub const ProcessInfoEntry = extern struct {
     thread_count: u8,
     _pad: [2]u8 = .{ 0, 0 },
     name: [32]u8,
+};
+
+/// Capability information returned by cap_info syscall. `addr` and `size`
+/// hold type-specific data: physical base + size for memory/MMIO,
+/// port base + count for I/O ports, IRQ number + 0 for IRQ caps.
+pub const CapInfoResult = extern struct {
+    object_type: u8,
+    rights: u8,
+    _pad: [6]u8 = .{ 0, 0, 0, 0, 0, 0 },
+    addr: u64 = 0,
+    size: u64 = 0,
 };
 
 /// MSR addresses for syscall/sysret
@@ -278,6 +290,7 @@ fn dispatch(num: u64, args: [6]u64) i64 {
         .process_list => sysProcessList(args),
         .mem_info => sysMemInfo(args),
         .uptime => sysUptime(args),
+        .dma_alloc => sysDmaAlloc(args),
         _ => @intFromEnum(SyscallError.invalid_syscall),
     };
 }
@@ -921,10 +934,67 @@ fn clearUserOutputArea() void {
 }
 
 fn sysCapInfo(args: [6]u64) i64 {
-    // cap_info(slot) -> returns type and rights packed
+    // cap_info(slot, result_ptr) -> fill CapInfoResult for the cap
     const slot: capability.CapSlot = @truncate(args[0]);
-    _ = slot;
-    return @intFromEnum(SyscallError.not_implemented);
+    const result_ptr = args[1];
+
+    if (!usermode.isUserAddress(result_ptr)) {
+        return @intFromEnum(SyscallError.invalid_argument);
+    }
+
+    const proc = process.getCurrentProcess() orelse {
+        return @intFromEnum(SyscallError.invalid_capability);
+    };
+    const cap_table = proc.cap_table orelse {
+        return @intFromEnum(SyscallError.invalid_capability);
+    };
+
+    if (slot >= capability.MAX_CAPS) {
+        return @intFromEnum(SyscallError.invalid_capability);
+    }
+    if (!cap_table.isSlotUsed(slot)) {
+        return @intFromEnum(SyscallError.invalid_capability);
+    }
+
+    const cap = &cap_table.slots[slot];
+    if (!cap.isValid()) {
+        return @intFromEnum(SyscallError.invalid_capability);
+    }
+
+    var info = CapInfoResult{
+        .object_type = @intFromEnum(cap.object_type),
+        .rights = @bitCast(cap.rights),
+    };
+
+    const obj = cap.obj.?;
+    switch (cap.object_type) {
+        .memory, .device_mmio => {
+            if (object.cast(object.MemoryObject, obj)) |mem_obj| {
+                info.addr = mem_obj.phys_start;
+                info.size = mem_obj.size;
+            } else if (object.cast(object.DeviceMmioObject, obj)) |mmio_obj| {
+                info.addr = mmio_obj.phys_addr;
+                info.size = mmio_obj.size;
+            }
+        },
+        .ioport => {
+            if (object.cast(object.IoPortObject, obj)) |io_obj| {
+                info.addr = io_obj.port_start;
+                info.size = io_obj.port_count;
+            }
+        },
+        .irq => {
+            if (object.cast(object.IrqObject, obj)) |irq_obj| {
+                info.addr = irq_obj.irq_num;
+                info.size = 0;
+            }
+        },
+        else => {},
+    }
+
+    const out: *CapInfoResult = @ptrFromInt(result_ptr);
+    out.* = info;
+    return @intFromEnum(SyscallError.success);
 }
 
 fn sysProcessInfo(args: [6]u64) i64 {
@@ -1295,6 +1365,59 @@ fn sysUptime(args: [6]u64) i64 {
     return @as(i64, @intCast(ticks));
 }
 
+/// dma_alloc(vaddr, size) -> phys_addr on success, negative on error.
+///
+/// Allocates `size` (rounded up to page granularity) of physically-
+/// contiguous frames, zeros them, and maps them into the calling
+/// process at `vaddr` as user-RW. The physical base address is
+/// returned in rax so the driver can program it into the device.
+/// Restricted to processes flagged as `driver_process`.
+fn sysDmaAlloc(args: [6]u64) i64 {
+    const vaddr = args[0];
+    const size = args[1];
+
+    if (size == 0) return @intFromEnum(SyscallError.invalid_argument);
+
+    const proc = process.getCurrentProcess() orelse {
+        return @intFromEnum(SyscallError.permission_denied);
+    };
+    if (!proc.flags.driver_process) {
+        return @intFromEnum(SyscallError.permission_denied);
+    }
+
+    const space = proc.address_space orelse {
+        return @intFromEnum(SyscallError.out_of_memory);
+    };
+
+    // Align and validate target vaddr.
+    const aligned_vaddr = vaddr & ~@as(u64, pmm.PAGE_SIZE - 1);
+    const aligned_size = ((size + pmm.PAGE_SIZE - 1) / pmm.PAGE_SIZE) * pmm.PAGE_SIZE;
+    if (!usermode.isUserAddress(aligned_vaddr) or
+        !usermode.isUserAddress(aligned_vaddr + aligned_size - 1))
+    {
+        return @intFromEnum(SyscallError.invalid_argument);
+    }
+
+    const num_pages = aligned_size / pmm.PAGE_SIZE;
+    const phys_base = pmm.allocFrames(num_pages) orelse {
+        return @intFromEnum(SyscallError.out_of_memory);
+    };
+
+    // Zero the backing memory via HHDM before exposing to the device.
+    var p: usize = 0;
+    while (p < num_pages) : (p += 1) {
+        const v: [*]u8 = @ptrFromInt(pmm.physToVirt(phys_base + p * pmm.PAGE_SIZE));
+        for (0..pmm.PAGE_SIZE) |i| v[i] = 0;
+    }
+
+    vmm.mapRegion(space, aligned_vaddr, phys_base, aligned_size, vmm.VmFlags.USER_RW) catch {
+        pmm.freeFrames(phys_base, num_pages);
+        return @intFromEnum(SyscallError.out_of_memory);
+    };
+
+    return @as(i64, @intCast(phys_base));
+}
+
 /// Check if syscall is initialized
 pub fn isInitialized() bool {
     return syscall_initialized;
@@ -1332,6 +1455,7 @@ pub fn getName(num: u64) []const u8 {
         .process_list => "process_list",
         .mem_info => "mem_info",
         .uptime => "uptime",
+        .dma_alloc => "dma_alloc",
         _ => "unknown",
     };
 }

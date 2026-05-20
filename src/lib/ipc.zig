@@ -220,7 +220,8 @@ pub fn send(endpoint: *Endpoint, msg: *const Message, sender_caps: ?*capability.
     sender.ipc_send_msg = msg;
     sender.ipc_cap_table = sender_caps;
 
-    endpoint.send_queue.enqueue(sender);
+    // blockCurrent enqueues us in the send_queue and switches away —
+    // don't enqueue first or the same thread ends up linked twice.
     scheduler.blockCurrent(&endpoint.send_queue);
 
     // Clear staging after waking
@@ -261,7 +262,8 @@ pub fn recv(endpoint: *Endpoint, msg: *Message, receiver_caps: ?*capability.CapT
     receiver.ipc_msg_buffer = msg;
     receiver.ipc_cap_table = receiver_caps;
 
-    endpoint.recv_queue.enqueue(receiver);
+    // blockCurrent enqueues us in the recv_queue and switches away —
+    // don't enqueue first or the same thread ends up linked twice.
     scheduler.blockCurrent(&endpoint.recv_queue);
 
     // After waking, message has been copied to msg by sender
