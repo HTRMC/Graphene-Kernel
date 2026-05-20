@@ -9,7 +9,7 @@ const log = @import("log");
 const PREFIX = "[log] ";
 
 pub fn main() i32 {
-    _ = syscall.debugPrint("[logger] service starting on slot 2\n");
+    _ = syscall.klog("[logger] service starting on slot 2\n");
 
     var req_buf: [log.MAX_LOG_MSG + 16]u8 = undefined;
     var reply_buf: [8]u8 = undefined;
@@ -24,11 +24,11 @@ pub fn main() i32 {
 
         const len: usize = @intCast(recv_len);
         if (len > 0) {
-            _ = syscall.debugPrint(PREFIX);
-            _ = syscall.debugPrint(req_buf[0..len]);
+            _ = syscall.klog(PREFIX);
+            _ = syscall.klog(req_buf[0..len]);
             // Newline if caller didn't include one
             if (req_buf[len - 1] != '\n') {
-                _ = syscall.debugPrint("\n");
+                _ = syscall.klog("\n");
             }
         }
 

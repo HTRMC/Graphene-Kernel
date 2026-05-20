@@ -32,6 +32,8 @@ pub const SyscallNumber = enum(u64) {
     mem_info = 26,
     uptime = 27,
     dma_alloc = 28,
+    klog = 29,
+    fb_info = 30,
 };
 
 /// Syscall error codes
@@ -390,6 +392,43 @@ pub fn capInfo(slot: u32, result: *CapInfoResult) i64 {
     return syscall2(
         @intFromEnum(SyscallNumber.cap_info),
         slot,
+        @intFromPtr(result),
+    );
+}
+
+/// Serial-only kernel log. Routes characters straight to the 16550
+/// UART without touching the framebuffer. Use for developer-visible
+/// diagnostics; user-facing output should go through the tty service.
+pub fn klog(msg: []const u8) i64 {
+    return syscall2(
+        @intFromEnum(SyscallNumber.klog),
+        @intFromPtr(msg.ptr),
+        msg.len,
+    );
+}
+
+/// klog convenience for comptime-known strings, mirroring `print`.
+pub fn klogStr(comptime msg: []const u8) void {
+    _ = klog(msg);
+}
+
+/// Framebuffer geometry returned by fb_info. phys_base + size describe
+/// the linear framebuffer region; width/height/pitch/bpp let the tty
+/// service lay out glyphs.
+pub const FbInfoResult = extern struct {
+    phys_base: u64,
+    size: u64,
+    width: u32,
+    height: u32,
+    pitch_bytes: u32,
+    bpp: u32,
+};
+
+/// Query framebuffer geometry. Returns 0 on success, negative on error
+/// (e.g. no framebuffer available on this boot).
+pub fn fbInfo(result: *FbInfoResult) i64 {
+    return syscall1(
+        @intFromEnum(SyscallNumber.fb_info),
         @intFromPtr(result),
     );
 }

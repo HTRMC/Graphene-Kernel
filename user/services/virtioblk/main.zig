@@ -162,14 +162,14 @@ fn initDevice() bool {
     var info: syscall.CapInfoResult = undefined;
 
     if (syscall.capInfo(IOPORT_CAP, &info) != 0) {
-        _ = syscall.debugPrint("[virtioblk] cap_info(IOPORT) failed\n");
+        _ = syscall.klog("[virtioblk] cap_info(IOPORT) failed\n");
         return false;
     }
     bar0_base = @truncate(info.addr);
 
     const phys = syscall.dmaAlloc(DMA_VADDR, DMA_SIZE);
     if (phys < 0) {
-        _ = syscall.debugPrint("[virtioblk] dma_alloc failed\n");
+        _ = syscall.klog("[virtioblk] dma_alloc failed\n");
         return false;
     }
     dma_phys = @intCast(phys);
@@ -185,7 +185,7 @@ fn initDevice() bool {
     ioWrite16(REG_QUEUE_SELECT, 0);
     qsize = ioRead16(REG_QUEUE_SIZE);
     if (qsize == 0 or qsize > MAX_QSIZE) {
-        _ = syscall.debugPrint("[virtioblk] unsupported queue size\n");
+        _ = syscall.klog("[virtioblk] unsupported queue size\n");
         ioWrite8(REG_DEVICE_STATUS, STATUS_FAILED);
         return false;
     }
@@ -205,7 +205,7 @@ fn initDevice() bool {
     status_offset = req_hdr_offset + 16;
     data_offset = (status_offset + 1 + 15) & ~@as(u64, 15);
     if (data_offset + blk.SECTOR_SIZE > DMA_SIZE) {
-        _ = syscall.debugPrint("[virtioblk] DMA region too small\n");
+        _ = syscall.klog("[virtioblk] DMA region too small\n");
         ioWrite8(REG_DEVICE_STATUS, STATUS_FAILED);
         return false;
     }
@@ -368,13 +368,13 @@ fn handleRequest(req_data: []const u8, resp_data: []u8) usize {
 // Entry
 // ---------------------------------------------------------------------------
 pub fn main() i32 {
-    _ = syscall.debugPrint("[virtioblk] starting...\n");
+    _ = syscall.klog("[virtioblk] starting...\n");
 
     if (!initDevice()) {
-        _ = syscall.debugPrint("[virtioblk] init failed\n");
+        _ = syscall.klog("[virtioblk] init failed\n");
         return 1;
     }
-    _ = syscall.debugPrint("[virtioblk] device ready\n");
+    _ = syscall.klog("[virtioblk] device ready\n");
 
     var req_buf: [blk.SECTOR_SIZE + 64]u8 = undefined;
     var resp_buf: [blk.SECTOR_SIZE + 64]u8 = undefined;

@@ -5,6 +5,31 @@ const syscall = @import("syscall");
 const vfs = @import("vfs");
 const logsvc = @import("log");
 
+pub const proc_name: []const u8 = "shell";
+
+// ---------------------------------------------------------------------------
+// Shell I/O goes through the tty service via the shared TTY endpoint.
+// Output: a write op renders the bytes onto the framebuffer.
+// Input: a read op pulls characters from tty's input queue (filled by
+// the kbd driver). Reads are non-blocking — we yield and retry.
+// ---------------------------------------------------------------------------
+fn ttyWrite(data: []const u8) void {
+    if (data.len == 0) return;
+    var reply_buf: [@sizeOf(vfs.ResponseHeader) + 4]u8 = undefined;
+    _ = vfs.callSlot(vfs.TTY_CAP_SLOT, .write, "", 0, @intCast(data.len), data, &reply_buf);
+}
+
+fn ttyPrint(comptime msg: []const u8) void {
+    ttyWrite(msg);
+}
+
+fn ttyGetc() i64 {
+    var buf: [16]u8 = undefined;
+    const n = syscall.capRecv(vfs.KBD_INPUT_SLOT, &buf, buf.len);
+    if (n <= 0) return -1;
+    return @as(i64, buf[0]);
+}
+
 /// Command buffer
 const MAX_CMD_LEN: usize = 128;
 var cmd_buffer: [MAX_CMD_LEN]u8 = undefined;
@@ -12,7 +37,7 @@ var cmd_len: usize = 0;
 
 /// Shell prompt
 fn printPrompt() void {
-    syscall.print("\ngraphene> ");
+    ttyPrint("\ngraphene> ");
 }
 
 /// Compare two strings
@@ -57,7 +82,7 @@ fn printNum(num: u32) void {
     var len: usize = 0;
 
     if (n == 0) {
-        syscall.print("0");
+        ttyPrint("0");
         return;
     }
 
@@ -66,7 +91,7 @@ fn printNum(num: u32) void {
         n /= 10;
     }
 
-    _ = syscall.debugPrint(buf[buf.len - len ..]);
+    _ = ttyWrite(buf[buf.len - len ..]);
 }
 
 // ============================================================================
@@ -74,25 +99,25 @@ fn printNum(num: u32) void {
 // ============================================================================
 
 fn cmdHelp() void {
-    syscall.print("Available commands:\n");
-    syscall.print("  help     - Show this help message\n");
-    syscall.print("  clear    - Clear the screen\n");
-    syscall.print("  info     - Show system information\n");
-    syscall.print("  sysinfo  - Show comprehensive system status\n");
-    syscall.print("  echo     - Echo text back\n");
-    syscall.print("  yield    - Yield CPU time slice\n");
-    syscall.print("  caps     - Show capability types\n");
-    syscall.print("  ipc-test - Test IPC functionality\n");
-    syscall.print("  ps       - List running processes\n");
-    syscall.print("  mem      - Show memory statistics\n");
-    syscall.print("  uptime   - Show system uptime\n");
-    syscall.print("  ls       - List files (ls [/dev])\n");
-    syscall.print("  cat      - Print file contents\n");
-    syscall.print("  stat     - Show file metadata\n");
-    syscall.print("  touch    - Create empty file\n");
-    syscall.print("  write    - Write text to file\n");
-    syscall.print("  rm       - Delete file\n");
-    syscall.print("  mount    - List active filesystems\n");
+    ttyPrint("Available commands:\n");
+    ttyPrint("  help     - Show this help message\n");
+    ttyPrint("  clear    - Clear the screen\n");
+    ttyPrint("  info     - Show system information\n");
+    ttyPrint("  sysinfo  - Show comprehensive system status\n");
+    ttyPrint("  echo     - Echo text back\n");
+    ttyPrint("  yield    - Yield CPU time slice\n");
+    ttyPrint("  caps     - Show capability types\n");
+    ttyPrint("  ipc-test - Test IPC functionality\n");
+    ttyPrint("  ps       - List running processes\n");
+    ttyPrint("  mem      - Show memory statistics\n");
+    ttyPrint("  uptime   - Show system uptime\n");
+    ttyPrint("  ls       - List files (ls [/dev])\n");
+    ttyPrint("  cat      - Print file contents\n");
+    ttyPrint("  stat     - Show file metadata\n");
+    ttyPrint("  touch    - Create empty file\n");
+    ttyPrint("  write    - Write text to file\n");
+    ttyPrint("  rm       - Delete file\n");
+    ttyPrint("  mount    - List active filesystems\n");
 }
 
 // ============================================================================
@@ -101,16 +126,16 @@ fn cmdHelp() void {
 
 fn printFsError(err: vfs.FsError) void {
     switch (err) {
-        .success => syscall.print("success"),
-        .not_found => syscall.print("not found"),
-        .exists => syscall.print("already exists"),
-        .no_space => syscall.print("no space"),
-        .invalid_arg => syscall.print("invalid argument"),
-        .is_directory => syscall.print("is a directory"),
-        .not_directory => syscall.print("not a directory"),
-        .not_empty => syscall.print("not empty"),
-        .io_error => syscall.print("io error"),
-        .permission => syscall.print("permission denied"),
+        .success => ttyPrint("success"),
+        .not_found => ttyPrint("not found"),
+        .exists => ttyPrint("already exists"),
+        .no_space => ttyPrint("no space"),
+        .invalid_arg => ttyPrint("invalid argument"),
+        .is_directory => ttyPrint("is a directory"),
+        .not_directory => ttyPrint("not a directory"),
+        .not_empty => ttyPrint("not empty"),
+        .io_error => ttyPrint("io error"),
+        .permission => ttyPrint("permission denied"),
     }
 }
 
@@ -129,9 +154,9 @@ fn cmdLs(args: []const u8) void {
     const result = vfs.callSlot(slot, .readdir, "", 0, 0, &.{}, &reply_buf);
     const count = vfs.readdirCount(&reply_buf);
     if (count < 0) {
-        syscall.print("ls: ");
+        ttyPrint("ls: ");
         printFsError(result.err);
-        syscall.print("\n");
+        ttyPrint("\n");
         return;
     }
 
@@ -142,16 +167,16 @@ fn cmdLs(args: []const u8) void {
         const ftype = result.payload[pos + 1];
         if (pos + 2 + name_len > result.payload.len) break;
         const name = result.payload[pos + 2 ..][0..name_len];
-        if (ftype == @intFromEnum(vfs.FileType.directory)) syscall.print("d ") else syscall.print("- ");
-        _ = syscall.debugPrint(name);
-        syscall.print("\n");
+        if (ftype == @intFromEnum(vfs.FileType.directory)) ttyPrint("d ") else ttyPrint("- ");
+        _ = ttyWrite(name);
+        ttyPrint("\n");
         pos += 2 + name_len;
     }
 }
 
 fn cmdCat(args: []const u8) void {
     if (args.len == 0) {
-        syscall.print("usage: cat <file>\n");
+        ttyPrint("usage: cat <file>\n");
         return;
     }
     const route = routePath(args);
@@ -163,13 +188,13 @@ fn cmdCat(args: []const u8) void {
         const max_chunk: u32 = @intCast(reply_buf.len - @sizeOf(vfs.ResponseHeader));
         const result = vfs.callSlot(route.slot, .read, route.name, offset, max_chunk, &.{}, &reply_buf);
         if (result.err != .success) {
-            syscall.print("cat: ");
+            ttyPrint("cat: ");
             printFsError(result.err);
-            syscall.print("\n");
+            ttyPrint("\n");
             return;
         }
         if (result.payload.len == 0) break;
-        _ = syscall.debugPrint(result.payload);
+        _ = ttyWrite(result.payload);
         offset += @intCast(result.payload.len);
         if (result.payload.len < max_chunk) break;
     }
@@ -177,46 +202,46 @@ fn cmdCat(args: []const u8) void {
 
 fn cmdStat(args: []const u8) void {
     if (args.len == 0) {
-        syscall.print("usage: stat <file>\n");
+        ttyPrint("usage: stat <file>\n");
         return;
     }
     const route = routePath(args);
     var reply_buf: [vfs.MAX_MSG_DATA]u8 = undefined;
     const result = vfs.callSlot(route.slot, .stat, route.name, 0, 0, &.{}, &reply_buf);
     if (result.err != .success) {
-        syscall.print("stat: ");
+        ttyPrint("stat: ");
         printFsError(result.err);
-        syscall.print("\n");
+        ttyPrint("\n");
         return;
     }
     if (result.payload.len < @sizeOf(vfs.FileStat)) {
-        syscall.print("stat: short reply\n");
+        ttyPrint("stat: short reply\n");
         return;
     }
     const st: *const vfs.FileStat = @ptrCast(@alignCast(result.payload.ptr));
-    syscall.print("  type: ");
+    ttyPrint("  type: ");
     if (st.file_type == @intFromEnum(vfs.FileType.directory)) {
-        syscall.print("directory\n");
+        ttyPrint("directory\n");
     } else {
-        syscall.print("regular\n");
+        ttyPrint("regular\n");
     }
-    syscall.print("  size: ");
+    ttyPrint("  size: ");
     printNum(st.size);
-    syscall.print(" bytes\n");
+    ttyPrint(" bytes\n");
 }
 
 fn cmdTouch(args: []const u8) void {
     if (args.len == 0) {
-        syscall.print("usage: touch <file>\n");
+        ttyPrint("usage: touch <file>\n");
         return;
     }
     const route = routePath(args);
     var reply_buf: [vfs.MAX_MSG_DATA]u8 = undefined;
     const result = vfs.callSlot(route.slot, .create, route.name, 0, 0, &.{}, &reply_buf);
     if (result.err != .success) {
-        syscall.print("touch: ");
+        ttyPrint("touch: ");
         printFsError(result.err);
-        syscall.print("\n");
+        ttyPrint("\n");
     }
 }
 
@@ -225,7 +250,7 @@ fn cmdWrite(args: []const u8) void {
     var i: usize = 0;
     while (i < args.len and args[i] != ' ') : (i += 1) {}
     if (i == 0 or i == args.len) {
-        syscall.print("usage: write <file> <text>\n");
+        ttyPrint("usage: write <file> <text>\n");
         return;
     }
     const path = args[0..i];
@@ -241,137 +266,137 @@ fn cmdWrite(args: []const u8) void {
     }
     const result = vfs.callSlot(route.slot, .write, route.name, 0, 0, text, &reply_buf);
     if (result.err != .success) {
-        syscall.print("write: ");
+        ttyPrint("write: ");
         printFsError(result.err);
-        syscall.print("\n");
+        ttyPrint("\n");
     }
 }
 
 fn cmdLog(args: []const u8) void {
     if (args.len == 0) {
-        syscall.print("usage: log <text>\n");
+        ttyPrint("usage: log <text>\n");
         return;
     }
     const ret = logsvc.log(args);
     if (ret < 0) {
-        syscall.print("log: error\n");
+        ttyPrint("log: error\n");
     }
 }
 
 fn cmdRm(args: []const u8) void {
     if (args.len == 0) {
-        syscall.print("usage: rm <file>\n");
+        ttyPrint("usage: rm <file>\n");
         return;
     }
     const route = routePath(args);
     var reply_buf: [vfs.MAX_MSG_DATA]u8 = undefined;
     const result = vfs.callSlot(route.slot, .delete, route.name, 0, 0, &.{}, &reply_buf);
     if (result.err != .success) {
-        syscall.print("rm: ");
+        ttyPrint("rm: ");
         printFsError(result.err);
-        syscall.print("\n");
+        ttyPrint("\n");
     }
 }
 
 fn cmdMount() void {
-    syscall.print("FILESYSTEM   SLOT  MOUNT     SERVER\n");
-    syscall.print("-----------  ----  --------  --------\n");
+    ttyPrint("FILESYSTEM   SLOT  MOUNT     SERVER\n");
+    ttyPrint("-----------  ----  --------  --------\n");
     // Probe each known filesystem with a ping; report status.
     var reply_buf: [vfs.MAX_MSG_DATA]u8 = undefined;
     const ramfs_res = vfs.callSlot(vfs.VFS_CAP_SLOT, .ping, "", 0, 0, &.{}, &reply_buf);
-    syscall.print("ramfs        1     /         ");
-    if (ramfs_res.err == .success) syscall.print("ok\n") else syscall.print("unavailable\n");
+    ttyPrint("ramfs        1     /         ");
+    if (ramfs_res.err == .success) ttyPrint("ok\n") else ttyPrint("unavailable\n");
 
     const devfs_res = vfs.callSlot(vfs.DEVFS_CAP_SLOT, .ping, "", 0, 0, &.{}, &reply_buf);
-    syscall.print("devfs        3     /dev      ");
-    if (devfs_res.err == .success) syscall.print("ok\n") else syscall.print("unavailable\n");
+    ttyPrint("devfs        3     /dev      ");
+    if (devfs_res.err == .success) ttyPrint("ok\n") else ttyPrint("unavailable\n");
 }
 
 fn cmdClear() void {
     // Clear by printing many newlines (simple approach)
     var i: u32 = 0;
     while (i < 30) : (i += 1) {
-        syscall.print("\n");
+        ttyPrint("\n");
     }
 }
 
 fn cmdInfo() void {
-    syscall.print("Graphene Kernel v0.1.0\n");
-    syscall.print("Architecture: x86_64\n");
-    syscall.print("Type: Hybrid Microkernel\n");
-    syscall.print("Security: Capability-based\n");
+    ttyPrint("Graphene Kernel v0.1.0\n");
+    ttyPrint("Architecture: x86_64\n");
+    ttyPrint("Type: Hybrid Microkernel\n");
+    ttyPrint("Security: Capability-based\n");
 }
 
 fn cmdEcho(args: []const u8) void {
     if (args.len > 0) {
-        _ = syscall.debugPrint(args);
+        _ = ttyWrite(args);
     }
-    syscall.print("\n");
+    ttyPrint("\n");
 }
 
 fn cmdYield() void {
-    syscall.print("Yielding CPU...\n");
+    ttyPrint("Yielding CPU...\n");
     syscall.threadYield();
-    syscall.print("Resumed.\n");
+    ttyPrint("Resumed.\n");
 }
 
 fn cmdCaps() void {
-    syscall.print("Capability Types:\n");
-    syscall.print("  memory      - Physical memory regions\n");
-    syscall.print("  thread      - Thread control\n");
-    syscall.print("  process     - Process control\n");
-    syscall.print("  ipc_endpoint- IPC endpoints\n");
-    syscall.print("  ipc_channel - IPC channels\n");
-    syscall.print("  irq         - Hardware interrupts\n");
-    syscall.print("  ioport      - I/O port access\n");
+    ttyPrint("Capability Types:\n");
+    ttyPrint("  memory      - Physical memory regions\n");
+    ttyPrint("  thread      - Thread control\n");
+    ttyPrint("  process     - Process control\n");
+    ttyPrint("  ipc_endpoint- IPC endpoints\n");
+    ttyPrint("  ipc_channel - IPC channels\n");
+    ttyPrint("  irq         - Hardware interrupts\n");
+    ttyPrint("  ioport      - I/O port access\n");
 }
 
 fn cmdIpcTest() void {
-    syscall.print("=== IPC Test ===\n");
+    ttyPrint("=== IPC Test ===\n");
 
     // Test 1: Create an endpoint
-    syscall.print("Creating endpoint... ");
+    ttyPrint("Creating endpoint... ");
     const ep_result = syscall.endpointCreate();
     if (ep_result < 0) {
-        syscall.print("FAILED (error ");
+        ttyPrint("FAILED (error ");
         printSignedNum(ep_result);
-        syscall.print(")\n");
+        ttyPrint(")\n");
         return;
     }
-    syscall.print("OK (slot ");
+    ttyPrint("OK (slot ");
     printNum(@intCast(@as(u64, @bitCast(ep_result))));
-    syscall.print(")\n");
+    ttyPrint(")\n");
 
     // Test 2: Create a channel (bidirectional)
-    syscall.print("Creating channel... ");
+    ttyPrint("Creating channel... ");
     var slot0: u32 = 0;
     var slot1: u32 = 0;
     const ch_result = syscall.channelCreate(&slot0, &slot1);
     if (ch_result < 0) {
-        syscall.print("FAILED (error ");
+        ttyPrint("FAILED (error ");
         printSignedNum(ch_result);
-        syscall.print(")\n");
+        ttyPrint(")\n");
         return;
     }
-    syscall.print("OK (slots ");
+    ttyPrint("OK (slots ");
     printNum(slot0);
-    syscall.print(", ");
+    ttyPrint(", ");
     printNum(slot1);
-    syscall.print(")\n");
+    ttyPrint(")\n");
 
-    syscall.print("\nIPC subsystem working!\n");
-    syscall.print("Note: Full send/recv test requires async mode\n");
-    syscall.print("or multiple processes.\n");
+    ttyPrint("\nIPC subsystem working!\n");
+    ttyPrint("Note: Full send/recv test requires async mode\n");
+    ttyPrint("or multiple processes.\n");
 }
 
 fn cmdPs() void {
-    syscall.print("PID   STATE    THREADS  NAME\n");
-    syscall.print("----  -------  -------  ----------------\n");
+    ttyPrint("PID   STATE    THREADS  NAME\n");
+    ttyPrint("----  -------  -------  ----------------\n");
 
     // Get process count
     const count_result = syscall.processCount();
     if (count_result < 0) {
-        syscall.print("Error getting process count\n");
+        ttyPrint("Error getting process count\n");
         return;
     }
 
@@ -381,7 +406,7 @@ fn cmdPs() void {
 
     const list_result = syscall.processList(&entries, max_entries);
     if (list_result < 0) {
-        syscall.print("Error getting process list\n");
+        ttyPrint("Error getting process list\n");
         return;
     }
 
@@ -392,24 +417,24 @@ fn cmdPs() void {
 
         // Print PID (right-padded)
         printNumPadded(entry.pid, 4);
-        syscall.print("  ");
+        ttyPrint("  ");
 
         // Print state
         switch (entry.state) {
-            0 => syscall.print("running"),
-            1 => syscall.print("stopped"),
-            2 => syscall.print("zombie "),
-            else => syscall.print("unknown"),
+            0 => ttyPrint("running"),
+            1 => ttyPrint("stopped"),
+            2 => ttyPrint("zombie "),
+            else => ttyPrint("unknown"),
         }
-        syscall.print("  ");
+        ttyPrint("  ");
 
         // Print thread count
         printNumPadded(entry.thread_count, 7);
-        syscall.print("  ");
+        ttyPrint("  ");
 
         // Print name (null-terminated)
         printProcessName(&entry.name);
-        syscall.print("\n");
+        ttyPrint("\n");
     }
 }
 
@@ -422,9 +447,9 @@ fn printNumPadded(num: u32, width: usize) void {
     if (n == 0) {
         // Print padding spaces
         for (0..width - 1) |_| {
-            syscall.print(" ");
+            ttyPrint(" ");
         }
-        syscall.print("0");
+        ttyPrint("0");
         return;
     }
 
@@ -436,11 +461,11 @@ fn printNumPadded(num: u32, width: usize) void {
     // Print padding spaces
     if (len < width) {
         for (0..width - len) |_| {
-            syscall.print(" ");
+            ttyPrint(" ");
         }
     }
 
-    _ = syscall.debugPrint(buf[buf.len - len ..]);
+    _ = ttyWrite(buf[buf.len - len ..]);
 }
 
 /// Print process name (null-terminated from fixed array)
@@ -448,14 +473,14 @@ fn printProcessName(name: *const [32]u8) void {
     var len: usize = 0;
     while (len < 32 and name[len] != 0) : (len += 1) {}
     if (len > 0) {
-        _ = syscall.debugPrint(name[0..len]);
+        _ = ttyWrite(name[0..len]);
     }
 }
 
 /// Print a signed number
 fn printSignedNum(num: i64) void {
     if (num < 0) {
-        syscall.print("-");
+        ttyPrint("-");
         printNum(@intCast(@as(u64, @bitCast(-num))));
     } else {
         printNum(@intCast(@as(u64, @bitCast(num))));
@@ -463,14 +488,14 @@ fn printSignedNum(num: i64) void {
 }
 
 fn cmdMem() void {
-    syscall.print("Memory Statistics:\n");
-    syscall.print("------------------\n");
+    ttyPrint("Memory Statistics:\n");
+    ttyPrint("------------------\n");
 
     var mem_result: syscall.MemInfoResult = undefined;
     const result = syscall.memInfo(&mem_result);
 
     if (result < 0) {
-        syscall.print("Error getting memory info\n");
+        ttyPrint("Error getting memory info\n");
         return;
     }
 
@@ -483,30 +508,30 @@ fn cmdMem() void {
     const free_mb = free_kb / 1024;
     const used_mb = used_kb / 1024;
 
-    syscall.print("Total:  ");
+    ttyPrint("Total:  ");
     printNum64(total_mb);
-    syscall.print(" MB (");
+    ttyPrint(" MB (");
     printNum64(total_kb);
-    syscall.print(" KB)\n");
+    ttyPrint(" KB)\n");
 
-    syscall.print("Used:   ");
+    ttyPrint("Used:   ");
     printNum64(used_mb);
-    syscall.print(" MB (");
+    ttyPrint(" MB (");
     printNum64(used_kb);
-    syscall.print(" KB)\n");
+    ttyPrint(" KB)\n");
 
-    syscall.print("Free:   ");
+    ttyPrint("Free:   ");
     printNum64(free_mb);
-    syscall.print(" MB (");
+    ttyPrint(" MB (");
     printNum64(free_kb);
-    syscall.print(" KB)\n");
+    ttyPrint(" KB)\n");
 
     // Calculate percentage
     if (mem_result.total_bytes > 0) {
         const used_percent = (mem_result.used_bytes * 100) / mem_result.total_bytes;
-        syscall.print("Usage:  ");
+        ttyPrint("Usage:  ");
         printNum64(used_percent);
-        syscall.print("%\n");
+        ttyPrint("%\n");
     }
 }
 
@@ -514,7 +539,7 @@ fn cmdUptime() void {
     const ticks = syscall.uptime();
 
     if (ticks < 0) {
-        syscall.print("Error getting uptime\n");
+        ttyPrint("Error getting uptime\n");
         return;
     }
 
@@ -524,49 +549,49 @@ fn cmdUptime() void {
     const minutes = seconds / 60;
     const hours = minutes / 60;
 
-    syscall.print("System Uptime:\n");
-    syscall.print("--------------\n");
+    ttyPrint("System Uptime:\n");
+    ttyPrint("--------------\n");
 
-    syscall.print("Ticks:   ");
+    ttyPrint("Ticks:   ");
     printNum64(ticks_u);
-    syscall.print("\n");
+    ttyPrint("\n");
 
     if (hours > 0) {
-        syscall.print("Time:    ");
+        ttyPrint("Time:    ");
         printNum64(hours);
-        syscall.print("h ");
+        ttyPrint("h ");
         printNum64(minutes % 60);
-        syscall.print("m ");
+        ttyPrint("m ");
         printNum64(seconds % 60);
-        syscall.print("s\n");
+        ttyPrint("s\n");
     } else if (minutes > 0) {
-        syscall.print("Time:    ");
+        ttyPrint("Time:    ");
         printNum64(minutes);
-        syscall.print("m ");
+        ttyPrint("m ");
         printNum64(seconds % 60);
-        syscall.print("s\n");
+        ttyPrint("s\n");
     } else {
-        syscall.print("Time:    ");
+        ttyPrint("Time:    ");
         printNum64(seconds);
-        syscall.print("s\n");
+        ttyPrint("s\n");
     }
 }
 
 fn cmdSysinfo() void {
-    syscall.print("=======================================\n");
-    syscall.print("       GRAPHENE SYSTEM STATUS\n");
-    syscall.print("=======================================\n\n");
+    ttyPrint("=======================================\n");
+    ttyPrint("       GRAPHENE SYSTEM STATUS\n");
+    ttyPrint("=======================================\n\n");
 
     // Kernel info
-    syscall.print("[Kernel]\n");
-    syscall.print("  Name:      Graphene Kernel\n");
-    syscall.print("  Version:   0.1.0\n");
-    syscall.print("  Arch:      x86_64\n");
-    syscall.print("  Type:      Hybrid Microkernel\n");
-    syscall.print("  Security:  Capability-based\n\n");
+    ttyPrint("[Kernel]\n");
+    ttyPrint("  Name:      Graphene Kernel\n");
+    ttyPrint("  Version:   0.1.0\n");
+    ttyPrint("  Arch:      x86_64\n");
+    ttyPrint("  Type:      Hybrid Microkernel\n");
+    ttyPrint("  Security:  Capability-based\n\n");
 
     // Memory info
-    syscall.print("[Memory]\n");
+    ttyPrint("[Memory]\n");
     var mem_result: syscall.MemInfoResult = undefined;
     const mem_status = syscall.memInfo(&mem_result);
     if (mem_status >= 0) {
@@ -578,23 +603,23 @@ fn cmdSysinfo() void {
         else
             0;
 
-        syscall.print("  Total:     ");
+        ttyPrint("  Total:     ");
         printNum64(total_mb);
-        syscall.print(" MB\n");
-        syscall.print("  Used:      ");
+        ttyPrint(" MB\n");
+        ttyPrint("  Used:      ");
         printNum64(used_mb);
-        syscall.print(" MB (");
+        ttyPrint(" MB (");
         printNum64(usage_percent);
-        syscall.print("%)\n");
-        syscall.print("  Free:      ");
+        ttyPrint("%)\n");
+        ttyPrint("  Free:      ");
         printNum64(free_mb);
-        syscall.print(" MB\n\n");
+        ttyPrint(" MB\n\n");
     } else {
-        syscall.print("  (unavailable)\n\n");
+        ttyPrint("  (unavailable)\n\n");
     }
 
     // Uptime
-    syscall.print("[Uptime]\n");
+    ttyPrint("[Uptime]\n");
     const ticks = syscall.uptime();
     if (ticks >= 0) {
         const ticks_u: u64 = @intCast(ticks);
@@ -602,32 +627,32 @@ fn cmdSysinfo() void {
         const minutes = seconds / 60;
         const hours = minutes / 60;
 
-        syscall.print("  Time:      ");
+        ttyPrint("  Time:      ");
         if (hours > 0) {
             printNum64(hours);
-            syscall.print("h ");
+            ttyPrint("h ");
             printNum64(minutes % 60);
-            syscall.print("m ");
+            ttyPrint("m ");
         } else if (minutes > 0) {
             printNum64(minutes);
-            syscall.print("m ");
+            ttyPrint("m ");
         }
         printNum64(seconds % 60);
-        syscall.print("s\n");
-        syscall.print("  Ticks:     ");
+        ttyPrint("s\n");
+        ttyPrint("  Ticks:     ");
         printNum64(ticks_u);
-        syscall.print("\n\n");
+        ttyPrint("\n\n");
     } else {
-        syscall.print("  (unavailable)\n\n");
+        ttyPrint("  (unavailable)\n\n");
     }
 
     // Process info
-    syscall.print("[Processes]\n");
+    ttyPrint("[Processes]\n");
     const count_result = syscall.processCount();
     if (count_result >= 0) {
-        syscall.print("  Running:   ");
+        ttyPrint("  Running:   ");
         printNum(@intCast(@as(u64, @bitCast(count_result))));
-        syscall.print(" processes\n");
+        ttyPrint(" processes\n");
 
         // List process names
         var entries: [16]syscall.ProcessInfoEntry = undefined;
@@ -635,18 +660,18 @@ fn cmdSysinfo() void {
         const list_result = syscall.processList(&entries, max_entries);
         if (list_result >= 0) {
             const actual_count: usize = @intCast(@as(u64, @bitCast(list_result)));
-            syscall.print("  Services:  ");
+            ttyPrint("  Services:  ");
             for (0..actual_count) |i| {
-                if (i > 0) syscall.print(", ");
+                if (i > 0) ttyPrint(", ");
                 printProcessName(&entries[i].name);
             }
-            syscall.print("\n");
+            ttyPrint("\n");
         }
     } else {
-        syscall.print("  (unavailable)\n");
+        ttyPrint("  (unavailable)\n");
     }
 
-    syscall.print("\n=======================================\n");
+    ttyPrint("\n=======================================\n");
 }
 
 /// Print a 64-bit number
@@ -656,7 +681,7 @@ fn printNum64(num: u64) void {
     var len: usize = 0;
 
     if (n == 0) {
-        syscall.print("0");
+        ttyPrint("0");
         return;
     }
 
@@ -665,13 +690,13 @@ fn printNum64(num: u64) void {
         n /= 10;
     }
 
-    _ = syscall.debugPrint(buf[buf.len - len ..]);
+    _ = ttyWrite(buf[buf.len - len ..]);
 }
 
 fn cmdUnknown(cmd: []const u8) void {
-    syscall.print("Unknown command: ");
-    _ = syscall.debugPrint(cmd);
-    syscall.print("\nType 'help' for available commands.\n");
+    ttyPrint("Unknown command: ");
+    _ = ttyWrite(cmd);
+    ttyPrint("\nType 'help' for available commands.\n");
 }
 
 /// Execute a command
@@ -744,7 +769,7 @@ fn readLine() []const u8 {
     cmd_len = 0;
 
     while (true) {
-        const result = syscall.getchar();
+        const result = ttyGetc();
         if (result < 0) {
             // Error - return what we have
             break;
@@ -753,18 +778,21 @@ fn readLine() []const u8 {
         const c: u8 = @truncate(@as(u64, @bitCast(result)));
 
         if (c == '\n') {
-            // Enter pressed - return command
             break;
         } else if (c == 8) {
-            // Backspace
+            // Backspace: drop a char from the buffer and visibly erase
+            // one cell on the screen.
             if (cmd_len > 0) {
                 cmd_len -= 1;
+                const bs = [_]u8{8};
+                ttyWrite(&bs);
             }
         } else if (c >= 32 and c < 127) {
-            // Printable character
             if (cmd_len < MAX_CMD_LEN - 1) {
                 cmd_buffer[cmd_len] = c;
                 cmd_len += 1;
+                const echo = [_]u8{c};
+                ttyWrite(&echo);
             }
         }
     }
@@ -774,14 +802,14 @@ fn readLine() []const u8 {
 
 /// Main entry point
 pub fn main() i32 {
-    syscall.print("Graphene Shell v0.1.0\n");
-    syscall.print("Type 'help' for available commands.\n");
+    ttyPrint("Graphene Shell v0.1.0\n");
+    ttyPrint("Type 'help' for available commands.\n");
 
     // Main shell loop
     while (true) {
         printPrompt();
         const cmd = readLine();
-        syscall.print("\n"); // Echo newline after Enter
+        ttyPrint("\n"); // Echo newline after Enter
         executeCommand(cmd);
     }
 

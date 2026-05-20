@@ -26,6 +26,17 @@ pub const BLK_CAP_SLOT: u32 = 4;
 /// can forward /mnt/... path requests.
 pub const FATFS_CAP_SLOT: u32 = 5;
 
+/// Well-known capability slot for the tty service.
+/// Tty is now output-only — clients (shell, devfs) hold SEND and tty
+/// holds HANDLE. Input from the keyboard goes via KBD_INPUT below.
+pub const TTY_CAP_SLOT: u32 = 6;
+
+/// Keyboard-to-shell input endpoint. kbd holds SEND and pushes one
+/// character per scancode; shell holds HANDLE and reads via capRecv.
+/// Using a dedicated endpoint avoids the multi-client recv-queue race
+/// that a single shared TTY endpoint creates.
+pub const KBD_INPUT_SLOT: u32 = 8;
+
 /// Filesystem operation codes
 pub const FsOp = enum(u8) {
     open = 1,
@@ -37,6 +48,8 @@ pub const FsOp = enum(u8) {
     create = 7,
     delete = 8,
     mkdir = 9,
+    /// tty-specific: push bytes into the input queue (kbd → tty).
+    tty_input = 10,
     ping = 255,
 };
 

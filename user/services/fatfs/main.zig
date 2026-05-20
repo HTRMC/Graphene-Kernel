@@ -106,13 +106,13 @@ fn rdU32(buf: []const u8, off: usize) u32 {
 // ---------------------------------------------------------------------------
 fn mount() bool {
     if (!readSector(0)) {
-        _ = syscall.debugPrint("[fatfs] boot sector read failed\n");
+        _ = syscall.klog("[fatfs] boot sector read failed\n");
         return false;
     }
 
     const bps = rdU16(&sector_buf, 0x0B);
     if (bps != SECTOR_SIZE) {
-        _ = syscall.debugPrint("[fatfs] non-512 sector unsupported\n");
+        _ = syscall.klog("[fatfs] non-512 sector unsupported\n");
         return false;
     }
     sectors_per_cluster = sector_buf[0x0D];
@@ -122,7 +122,7 @@ fn mount() bool {
     root_cluster = rdU32(&sector_buf, 0x2C);
 
     if (sectors_per_cluster == 0 or num_fats == 0 or sectors_per_fat == 0 or root_cluster < 2) {
-        _ = syscall.debugPrint("[fatfs] bad BPB\n");
+        _ = syscall.klog("[fatfs] bad BPB\n");
         return false;
     }
 
@@ -319,6 +319,10 @@ fn handleRequest(req_data: []const u8, resp_data: []u8) usize {
     }
 
     switch (op) {
+        .tty_input => {
+            resp.* = .{ .error_code = @intFromEnum(vfs.FsError.invalid_arg), .size = 0 };
+            return hdr_sz;
+        },
         .ping => {
             resp.* = .{ .error_code = 0, .size = 4 };
             if (resp_payload.len >= 4) {
@@ -397,14 +401,14 @@ fn handleRequest(req_data: []const u8, resp_data: []u8) usize {
 }
 
 pub fn main() i32 {
-    _ = syscall.debugPrint("[fatfs] starting...\n");
+    _ = syscall.klog("[fatfs] starting...\n");
 
     if (!mount()) {
-        _ = syscall.debugPrint("[fatfs] mount failed\n");
+        _ = syscall.klog("[fatfs] mount failed\n");
         return 1;
     }
 
-    _ = syscall.debugPrint("[fatfs] mounted, root indexed\n");
+    _ = syscall.klog("[fatfs] mounted, root indexed\n");
 
     var req_buf: [vfs.MAX_MSG_DATA]u8 = undefined;
     var resp_buf: [vfs.MAX_MSG_DATA]u8 = undefined;

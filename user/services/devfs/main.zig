@@ -15,6 +15,7 @@ const DevKind = enum(u8) {
     zero_dev = 2,
     console_dev = 3,
     vda_dev = 4,
+    tty_dev = 5,
 };
 
 const DevFile = struct {
@@ -27,7 +28,13 @@ const devices = [_]DevFile{
     .{ .name = "zero", .kind = .zero_dev },
     .{ .name = "console", .kind = .console_dev },
     .{ .name = "vda", .kind = .vda_dev },
+    .{ .name = "tty0", .kind = .tty_dev },
 };
+
+/// Forward an op to the tty service, preserving its raw reply.
+fn ttyForward(op: vfs.FsOp, offset: u32, size: u32, data: []const u8, reply_buf: []u8) vfs.CallResult {
+    return vfs.callSlot(vfs.TTY_CAP_SLOT, op, "", offset, size, data, reply_buf);
+}
 
 /// Ask the virtio-blk service for the disk's capacity in 512-byte
 /// sectors. Returns 0 if the BLK service is not available.
@@ -110,6 +117,10 @@ fn handleRequest(req_data: []const u8, resp_data: []u8) usize {
     if (req_data.len > data_offset) data = req_data[data_offset..];
 
     switch (op) {
+        .tty_input => {
+            resp.* = .{ .error_code = @intFromEnum(vfs.FsError.invalid_arg), .size = 0 };
+            return hdr_sz;
+        },
         .ping => {
             resp.* = .{ .error_code = 0, .size = 4 };
             if (resp_payload.len >= 4) {
@@ -189,6 +200,18 @@ fn handleRequest(req_data: []const u8, resp_data: []u8) usize {
                     resp.* = .{ .error_code = 0, .size = got };
                     return hdr_sz + got;
                 },
+                .tty_dev => {
+                    // Forward the read to the tty service; its reply
+                    // shape matches our VFS response wire so we can
+                    // copy verbatim.
+                    var tty_reply: [vfs.MAX_MSG_DATA]u8 = undefined;
+                    const want = @min(req.size, @as(u32, @intCast(resp_payload.len)));
+                    const r = ttyForward(.read, req.offset, want, &.{}, &tty_reply);
+                    const n: u32 = @intCast(r.payload.len);
+                    for (0..n) |i| resp_payload[i] = r.payload[i];
+                    resp.* = .{ .error_code = @intFromEnum(r.err), .size = n };
+                    return hdr_sz + n;
+                },
             }
         },
         .write => {
@@ -204,7 +227,7 @@ fn handleRequest(req_data: []const u8, resp_data: []u8) usize {
                 },
                 .console_dev => {
                     if (data.len > 0) {
-                        _ = syscall.debugPrint(data);
+                        _ = syscall.klog(data);
                     }
                     resp.* = .{ .error_code = 0, .size = @intCast(data.len) };
                     return hdr_sz;
@@ -224,6 +247,12 @@ fn handleRequest(req_data: []const u8, resp_data: []u8) usize {
                         return hdr_sz;
                     }
                     resp.* = .{ .error_code = 0, .size = wrote };
+                    return hdr_sz;
+                },
+                .tty_dev => {
+                    var tty_reply: [vfs.MAX_MSG_DATA]u8 = undefined;
+                    const r = ttyForward(.write, 0, @intCast(data.len), data, &tty_reply);
+                    resp.* = .{ .error_code = @intFromEnum(r.err), .size = @intCast(data.len) };
                     return hdr_sz;
                 },
             }
@@ -248,8 +277,8 @@ fn handleRequest(req_data: []const u8, resp_data: []u8) usize {
 }
 
 pub fn main() i32 {
-    _ = syscall.debugPrint("[devfs] Device filesystem service starting...\n");
-    _ = syscall.debugPrint("[devfs] Listening on DEVFS endpoint (slot 3)...\n");
+    _ = syscall.klog("[devfs] Device filesystem service starting...\n");
+    _ = syscall.klog("[devfs] Listening on DEVFS endpoint (slot 3)...\n");
 
     var req_buf: [vfs.MAX_MSG_DATA]u8 = undefined;
     var resp_buf: [vfs.MAX_MSG_DATA]u8 = undefined;

@@ -32,7 +32,7 @@ fn initFs() void {
     files[0].name_len = 1;
     files[0].parent = 0;
     fs_initialized = true;
-    _ = syscall.debugPrint("[ramfs] Filesystem initialized\n");
+    _ = syscall.klog("[ramfs] Filesystem initialized\n");
 }
 
 fn findFile(name: []const u8, parent: u8) ?u8 {
@@ -131,6 +131,10 @@ fn handleRequest(req_data: []const u8, resp_data: []u8) usize {
     if (req_data.len > data_offset) data = req_data[data_offset..];
 
     switch (op) {
+        .tty_input => {
+            resp.* = .{ .error_code = @intFromEnum(vfs.FsError.invalid_arg), .size = 0 };
+            return hdr_sz;
+        },
         .ping => {
             resp.* = .{ .error_code = 0, .size = 4 };
             if (resp_payload.len >= 4) {
@@ -248,7 +252,7 @@ fn strEql(a: []const u8, b: []const u8) bool {
 // ============================================================================
 
 pub fn main() i32 {
-    _ = syscall.debugPrint("[ramfs] RAM Filesystem service starting...\n");
+    _ = syscall.klog("[ramfs] RAM Filesystem service starting...\n");
     initFs();
 
     // Seed test files
@@ -262,8 +266,8 @@ pub fn main() i32 {
     }
     _ = createFile("test", 0, .directory);
 
-    _ = syscall.debugPrint("[ramfs] Test files seeded\n");
-    _ = syscall.debugPrint("[ramfs] Listening on VFS endpoint...\n");
+    _ = syscall.klog("[ramfs] Test files seeded\n");
+    _ = syscall.klog("[ramfs] Listening on VFS endpoint...\n");
 
     var req_buf: [vfs.MAX_MSG_DATA]u8 = undefined;
     var resp_buf: [vfs.MAX_MSG_DATA]u8 = undefined;

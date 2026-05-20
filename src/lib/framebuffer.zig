@@ -1,15 +1,57 @@
 const limine = @import("limine.zig");
+const pmm = @import("pmm.zig");
 
 var fb_addr: [*]u32 = undefined;
+var fb_virt: u64 = 0;
+var fb_size: u64 = 0;
 var fb_width: u32 = 0;
 var fb_height: u32 = 0;
-var fb_pitch: u32 = 0;
+var fb_pitch: u32 = 0; // pitch in pixels
+var fb_bpp: u32 = 0;
 
 pub fn init(fb: *limine.Framebuffer) void {
     fb_addr = @ptrCast(@alignCast(fb.address));
     fb_width = @intCast(fb.width);
     fb_height = @intCast(fb.height);
     fb_pitch = @intCast(fb.pitch / 4); // Convert to pixel pitch
+    fb_bpp = @intCast(fb.bpp);
+    fb_virt = @intFromPtr(fb.address);
+    fb_size = @as(u64, @intCast(fb.pitch)) * @as(u64, @intCast(fb.height));
+}
+
+/// Physical address of the linear framebuffer. Computed lazily because
+/// framebuffer.init may run before pmm.init (the HHDM offset is only
+/// known after pmm is initialised).
+pub fn getPhysAddr() u64 {
+    if (fb_virt == 0) return 0;
+    return pmm.virtToPhys(fb_virt);
+}
+
+/// Total framebuffer byte size (pitch * height).
+pub fn getSize() u64 {
+    return fb_size;
+}
+
+pub fn getWidth() u32 {
+    return fb_width;
+}
+
+pub fn getHeight() u32 {
+    return fb_height;
+}
+
+/// Pitch in pixels (bytes / 4 for 32 bpp).
+pub fn getPitchPixels() u32 {
+    return fb_pitch;
+}
+
+/// Pitch in bytes.
+pub fn getPitchBytes() u32 {
+    return fb_pitch * 4;
+}
+
+pub fn getBpp() u32 {
+    return fb_bpp;
 }
 
 pub fn clear(color: u32) void {

@@ -48,6 +48,8 @@ pub const SyscallNumber = enum(u64) {
     mem_info = 26, // Get memory statistics
     uptime = 27, // Get system uptime in ticks
     dma_alloc = 28, // Driver-only: allocate contiguous DMA buffer
+    klog = 29, // Serial-only kernel log (no framebuffer)
+    fb_info = 30, // Query framebuffer geometry
     _,
 };
 
@@ -291,6 +293,8 @@ fn dispatch(num: u64, args: [6]u64) i64 {
         .mem_info => sysMemInfo(args),
         .uptime => sysUptime(args),
         .dma_alloc => sysDmaAlloc(args),
+        .klog => sysKlog(args),
+        .fb_info => sysFbInfo(args),
         _ => @intFromEnum(SyscallError.invalid_syscall),
     };
 }
@@ -863,6 +867,48 @@ fn sysIrqAck(args: [6]u64) i64 {
     return @intFromEnum(SyscallError.success);
 }
 
+/// klog: serial-only kernel log. Any process may call it. No framebuffer
+/// side effects so it can never race with the tty service's screen.
+fn sysKlog(args: [6]u64) i64 {
+    const str_ptr = args[0];
+    const str_len = args[1];
+
+    if (str_len == 0) return @intFromEnum(SyscallError.success);
+    if (str_len > 1024) return @intFromEnum(SyscallError.invalid_argument);
+
+    if (!usermode.isUserAddress(str_ptr) or !usermode.isUserAddress(str_ptr + str_len - 1)) {
+        return @intFromEnum(SyscallError.invalid_argument);
+    }
+
+    const str: [*]const u8 = @ptrFromInt(str_ptr);
+    serial.puts(str[0..str_len]);
+    return @intCast(str_len);
+}
+
+/// fb_info: return framebuffer geometry so the tty service knows how to
+/// lay out glyphs in the MemoryObject it mapped.
+fn sysFbInfo(args: [6]u64) i64 {
+    const result_ptr = args[0];
+    if (!usermode.isUserAddress(result_ptr)) {
+        return @intFromEnum(SyscallError.invalid_argument);
+    }
+
+    if (framebuffer.getPhysAddr() == 0) {
+        return @intFromEnum(SyscallError.not_found);
+    }
+
+    const out: *FbInfoResult = @ptrFromInt(result_ptr);
+    out.* = .{
+        .phys_base = framebuffer.getPhysAddr(),
+        .size = framebuffer.getSize(),
+        .width = framebuffer.getWidth(),
+        .height = framebuffer.getHeight(),
+        .pitch_bytes = framebuffer.getPitchBytes(),
+        .bpp = framebuffer.getBpp(),
+    };
+    return @intFromEnum(SyscallError.success);
+}
+
 /// Debug print position (advances inline, only newline moves to next line)
 /// Starts at Y=450 to avoid overlapping with kernel init messages (Y=150-430)
 /// Wraps at Y=620 to avoid panic area (Y=640+)
@@ -1332,6 +1378,19 @@ pub const MemInfoResult = extern struct {
     used_bytes: u64,
 };
 
+/// Framebuffer geometry returned by fb_info syscall. `phys_base` is the
+/// raw physical base address of the linear framebuffer — needed only
+/// by the tty service, which holds the framebuffer MemoryObject cap and
+/// maps it with mem_map.
+pub const FbInfoResult = extern struct {
+    phys_base: u64,
+    size: u64,
+    width: u32,
+    height: u32,
+    pitch_bytes: u32,
+    bpp: u32,
+};
+
 fn sysMemInfo(args: [6]u64) i64 {
     // mem_info(result_ptr) - get memory statistics
     // Returns memory info via pointer
@@ -1456,6 +1515,8 @@ pub fn getName(num: u64) []const u8 {
         .mem_info => "mem_info",
         .uptime => "uptime",
         .dma_alloc => "dma_alloc",
+        .klog => "klog",
+        .fb_info => "fb_info",
         _ => "unknown",
     };
 }

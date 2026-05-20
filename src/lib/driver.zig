@@ -6,7 +6,7 @@ const capability = @import("capability.zig");
 const process = @import("process.zig");
 const thread = @import("thread.zig");
 const pic = @import("pic.zig");
-const framebuffer = @import("framebuffer.zig");
+const serial = @import("serial.zig");
 const pci = @import("pci.zig");
 
 /// Maximum number of registered drivers
@@ -139,21 +139,21 @@ fn grantHardwareCapabilities(entry: *DriverEntry) bool {
     if (entry.irq) |irq_num| {
         // Create IRQ object
         const irq_obj = object.createIrqObject(irq_num) orelse {
-            framebuffer.puts("drv: IRQ obj create fail", 10, 420, 0x00ff0000);
+            serial.println("drv: IRQ obj create fail");
             return false;
         };
 
         // Find free capability slot
         const slot = cap_table.findFreeSlot() orelse {
             object.freeIrqObject(irq_obj);
-            framebuffer.puts("drv: no free slot", 10, 420, 0x00ff0000);
+            serial.println("drv: no free slot");
             return false;
         };
 
         // Insert capability with full rights
         capability.insertAt(cap_table, slot, &irq_obj.base, capability.Rights.ALL) catch {
             object.freeIrqObject(irq_obj);
-            framebuffer.puts("drv: cap insert fail", 10, 420, 0x00ff0000);
+            serial.println("drv: cap insert fail");
             return false;
         };
 
@@ -373,18 +373,14 @@ pub fn isInitialized() bool {
 
 /// Debug: print registered drivers
 pub fn debugPrintDrivers() void {
-    var y: u32 = 400;
-    framebuffer.puts("Registered drivers:", 10, y, 0x00ffff00);
-    y += 16;
-
+    serial.println("Registered drivers:");
     for (&drivers) |*entry| {
         if (entry.in_use) {
-            framebuffer.puts(entry.getName(), 20, y, 0x00ffffff);
-            y += 16;
+            serial.puts("  ");
+            serial.println(entry.getName());
         }
     }
-
     if (driver_count == 0) {
-        framebuffer.puts("  (none)", 20, y, 0x00808080);
+        serial.println("  (none)");
     }
 }

@@ -6,11 +6,11 @@ const syscall = @import("syscall");
 /// Main entry point for init
 pub fn main() i32 {
     // Print startup message
-    syscall.print("Graphene init started\n");
-    syscall.print("Running in user mode!\n");
+    syscall.klogStr("Graphene init started\n");
+    syscall.klogStr("Running in user mode!\n");
 
     // Print version info
-    syscall.print("Init process v0.1.0\n"); // TODO: make sure this text doesnt overlap. the text [Ok] Loaded: init
+    syscall.klogStr("Init process v0.1.0\n"); // TODO: make sure this text doesnt overlap. the text [Ok] Loaded: init
 
     // In a full implementation, init would:
     // 1. Mount filesystems
@@ -18,7 +18,7 @@ pub fn main() i32 {
     // 3. Spawn login/shell
 
     // For Phase 2, we just demonstrate user mode works
-    syscall.print("User space operational.\n");
+    syscall.klogStr("User space operational.\n");
 
     // Loop forever (init should never exit)
     while (true) {

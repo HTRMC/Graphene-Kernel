@@ -40,6 +40,7 @@ const serial = @import("lib/serial.zig");
 const apic = @import("lib/apic.zig");
 const ipc = @import("lib/ipc.zig");
 const capability = @import("lib/capability.zig");
+const object = @import("lib/object.zig");
 const pci = @import("lib/pci.zig");
 
 /// Debug logging - only enabled in Debug builds
@@ -80,39 +81,25 @@ pub export var memmap_request linksection(".limine_requests") = limine.MemoryMap
 pub export var hhdm_request linksection(".limine_requests") = limine.HhdmRequest{};
 pub export var module_request linksection(".limine_requests") = limine.ModuleRequest{};
 
-// Status display Y position
-var status_y: u32 = 150;
-
+// Boot diagnostics go to serial only — the framebuffer belongs to the
+// user-space tty service once it starts. No kernel code draws glyphs
+// outside of the panic handler.
 fn printStatus(msg: []const u8, color: u32) void {
-    framebuffer.puts(msg, 10, status_y, color);
-    status_y += 20;
-    // Also print to serial
+    _ = color;
     serial.println(msg);
 }
 
 fn printOk(msg: []const u8) void {
-    framebuffer.puts("[OK] ", 10, status_y, 0x0000ff00);
-    framebuffer.puts(msg, 50, status_y, 0x00ffffff);
-    status_y += 20;
-    // Also print to serial
     serial.puts("[OK] ");
     serial.println(msg);
 }
 
 fn printFail(msg: []const u8) void {
-    framebuffer.puts("[!!] ", 10, status_y, 0x00ff0000);
-    framebuffer.puts(msg, 50, status_y, 0x00ff0000);
-    status_y += 20;
-    // Also print to serial
     serial.puts("[!!] ");
     serial.println(msg);
 }
 
 fn printInfo(msg: []const u8) void {
-    framebuffer.puts("     ", 10, status_y, 0x00888888);
-    framebuffer.puts(msg, 50, status_y, 0x00888888);
-    status_y += 20;
-    // Also print to serial
     serial.puts("     ");
     serial.println(msg);
 }
@@ -147,19 +134,14 @@ export fn _start() callconv(.c) noreturn {
     // ========================================
     // Phase 2: Framebuffer Setup
     // ========================================
+    // Capture framebuffer geometry so user-space (tty service) can
+    // query it via fb_info and map the bytes via mem_map. The kernel
+    // does NOT draw any text — that's tty's job once it starts.
     if (framebuffer_request.response) |fb_response| {
         const fbs = fb_response.framebuffers();
         if (fbs.len > 0) {
             framebuffer.init(fbs[0]);
             framebuffer.clear(0x001a1a2e);
-
-            // Header
-            framebuffer.puts("Graphene Kernel v0.1.0", 10, 10, 0x00ffffff);
-            framebuffer.puts("======================", 10, 30, 0x00888888);
-            framebuffer.puts("Hybrid Microkernel | Capability-Based Security", 10, 60, 0x0000ff88);
-            framebuffer.puts("Phase 1 Complete", 10, 80, 0x00f7a41d);
-            framebuffer.puts("", 10, 110, 0x00ffffff);
-            framebuffer.puts("Initialization:", 10, 130, 0x00ffffff);
         }
     }
 
@@ -237,7 +219,6 @@ export fn _start() callconv(.c) noreturn {
     // ========================================
     // Phase 5: User Space Initialization
     // ========================================
-    status_y += 10;
     printStatus("All Phase 1 subsystems initialized!", 0x0000ff00);
 
     // Load boot modules
@@ -248,6 +229,8 @@ export fn _start() callconv(.c) noreturn {
     var devfs_proc: ?*process.Process = null;
     var virtioblk_proc: ?*process.Process = null;
     var fatfs_proc: ?*process.Process = null;
+    var tty_proc: ?*process.Process = null;
+    var kbd_proc: ?*process.Process = null;
     if (module_request.response) |mod_response| {
         const modules = mod_response.getModules();
         printInfo("Loading boot modules..."); // TODO: make sure this text doesnt overlap. the text Running in user mode!
@@ -263,7 +246,8 @@ export fn _start() callconv(.c) noreturn {
                 }
             } else if (strEql(module_name, "kbd")) {
                 // Load kbd as driver with IRQ 1 and I/O ports 0x60-0x64
-                if (loadDriverProcess(module, "kbd", driver.DriverType.keyboard, 1, 0x60, 5)) {
+                kbd_proc = loadDriverProcess(module, "kbd", driver.DriverType.keyboard, 1, 0x60, 5);
+                if (kbd_proc != null) {
                     printOk("Loaded: kbd (IRQ 1, ports 0x60-0x64)");
                 }
             } else if (strEql(module_name, "shell")) {
@@ -300,6 +284,12 @@ export fn _start() callconv(.c) noreturn {
                 // Load fatfs as a filesystem service that reads /dev/vda.
                 fatfs_proc = loadUserProcessP(module, "fatfs");
                 if (fatfs_proc != null) printOk("Loaded: fatfs (FAT32 filesystem)");
+            } else if (strEql(module_name, "tty")) {
+                // Load tty as the user-space terminal service. It needs
+                // the framebuffer cap (granted below) and HANDLE on the
+                // TTY endpoint.
+                tty_proc = loadUserProcessP(module, "tty");
+                if (tty_proc != null) printOk("Loaded: tty (terminal service)");
             } else {
                 // Unknown module - try to load as generic driver
                 printInfo("Skipping unknown module");
@@ -365,9 +355,64 @@ export fn _start() callconv(.c) noreturn {
         }
     }
 
+    // Wire TTY endpoint: tty gets HANDLE, shell gets SEND, at TTY_CAP_SLOT.
+    // Also grant SEND on the same endpoint to kbd (so it can push input)
+    // and devfs (so /dev/tty0 reads/writes can be forwarded).
+    var tty_endpoint: ?*ipc.Endpoint = null;
+    if (tty_proc != null and shell_proc != null) {
+        tty_endpoint = wireServiceEndpoint(tty_proc.?, shell_proc.?, TTY_CAP_SLOT);
+        if (tty_endpoint != null) {
+            printOk("TTY endpoint wired (slot 6)");
+        } else {
+            printFail("TTY endpoint wire failed");
+        }
+    }
+    // KBD_INPUT endpoint: kbd→shell direct channel for keystrokes.
+    // Separate from TTY so kbd's sends never park as "replies" in
+    // shell's TTY recv_queue.
+    if (kbd_proc != null and shell_proc != null) {
+        const kbd_input_ep = ipc.createEndpoint();
+        if (kbd_input_ep) |ep| {
+            const kbd_tbl = kbd_proc.?.cap_table.?;
+            const shell_tbl = shell_proc.?.cap_table.?;
+            capability.insertAt(kbd_tbl, KBD_INPUT_SLOT, &ep.base, capability.Rights{ .send = true }) catch {};
+            capability.insertAt(shell_tbl, KBD_INPUT_SLOT, &ep.base, capability.Rights{ .handle = true }) catch {};
+            if (kbd_tbl.isSlotUsed(KBD_INPUT_SLOT) and shell_tbl.isSlotUsed(KBD_INPUT_SLOT)) {
+                printOk("KBD_INPUT endpoint wired (slot 8)");
+            } else {
+                printFail("KBD_INPUT endpoint wire failed");
+            }
+        }
+    }
+    if (tty_endpoint != null and devfs_proc != null) {
+        if (grantSendCap(devfs_proc.?, tty_endpoint.?, TTY_CAP_SLOT)) {
+            printOk("TTY send cap granted to devfs");
+        } else {
+            printFail("TTY send cap grant to devfs failed");
+        }
+    }
+
+    // Hand the framebuffer to the tty service as a MemoryObject cap.
+    // tty maps it via mem_map and renders glyphs into it directly.
+    if (tty_proc != null and framebuffer.getPhysAddr() != 0) {
+        const fb_obj = object.createMmioMemoryObject(framebuffer.getPhysAddr(), framebuffer.getSize());
+        if (fb_obj != null) {
+            const tty_table = tty_proc.?.cap_table;
+            if (tty_table) |tbl| {
+                capability.insertAt(tbl, FB_CAP_SLOT, &fb_obj.?.base, capability.Rights.RW) catch {
+                    printFail("FB cap grant to tty failed");
+                };
+                if (tbl.isSlotUsed(FB_CAP_SLOT)) {
+                    printOk("Framebuffer cap granted to tty (slot 7)");
+                }
+            }
+        } else {
+            printFail("Framebuffer MemoryObject alloc failed");
+        }
+    }
+
     if (init_loaded) {
         printOk("Init process loaded");
-        status_y += 10;
         printStatus("Starting scheduler...", 0x00ffffff);
 
         // Enable interrupts
@@ -384,7 +429,6 @@ export fn _start() callconv(.c) noreturn {
         scheduler.start(); // Never returns
     } else {
         printInfo("No init module found - kernel standalone mode");
-        status_y += 10;
         printStatus("Kernel ready (no user space).", 0x00ffffff);
         halt();
     }
@@ -525,6 +569,9 @@ const LOG_CAP_SLOT: u32 = 2;
 const DEVFS_CAP_SLOT: u32 = 3;
 const BLK_CAP_SLOT: u32 = 4;
 const FATFS_CAP_SLOT: u32 = 5;
+const TTY_CAP_SLOT: u32 = 6;
+const FB_CAP_SLOT: u32 = 7;
+const KBD_INPUT_SLOT: u32 = 8;
 
 /// Create a VFS endpoint and inject the cap into ramfs (HANDLE) and shell (SEND).
 fn wireVfsEndpoint(ramfs: *process.Process, shell: *process.Process) bool {
@@ -749,14 +796,14 @@ fn loadDriverProcess(
     irq: ?u8,
     io_port_start: ?u16,
     io_port_count: u16,
-) bool {
+) ?*process.Process {
     // Get module data
     const module_addr: u64 = @intFromPtr(module.address);
     const module_size = module.size;
 
     if (module_size == 0) {
         printFail("Driver module is empty");
-        return false;
+        return null;
     }
 
     // Create slice from module data
@@ -766,13 +813,13 @@ fn loadDriverProcess(
     // Validate ELF
     if (!elf.isElf(data_slice)) {
         printFail("Driver module is not a valid ELF");
-        return false;
+        return null;
     }
 
     // Create driver process
     const drv_proc = process.create(null) orelse {
         printFail("Failed to create driver process");
-        return false;
+        return null;
     };
 
     drv_proc.setName(name);
@@ -782,28 +829,28 @@ fn loadDriverProcess(
     const space = drv_proc.address_space orelse {
         printFail("Driver process has no address space");
         process.destroy(drv_proc);
-        return false;
+        return null;
     };
 
     // Load ELF into address space
     const load_result = elf.load(space, data_slice) catch {
         printFail("Failed to load driver ELF");
         process.destroy(drv_proc);
-        return false;
+        return null;
     };
 
     // Allocate user stack
     _ = usermode.allocateUserStack(space) catch {
         printFail("Failed to allocate driver stack");
         process.destroy(drv_proc);
-        return false;
+        return null;
     };
 
     // Create main thread for driver
     const drv_thread = thread.createUser(drv_proc, load_result.entry_point, usermode.USER_STACK_TOP - 8) orelse {
         printFail("Failed to create driver thread");
         process.destroy(drv_proc);
-        return false;
+        return null;
     };
 
     // Add thread to process
@@ -822,11 +869,11 @@ fn loadDriverProcess(
     if (entry == null) {
         printFail("Failed to register driver");
         process.destroy(drv_proc);
-        return false;
+        return null;
     }
 
     // Add to scheduler
     scheduler.enqueue(drv_thread);
 
-    return true;
+    return drv_proc;
 }

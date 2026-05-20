@@ -1,11 +1,18 @@
 // Graphene PS/2 Keyboard Driver
-// User-space driver using IRQ and I/O port capabilities
+// User-space driver using IRQ and I/O port capabilities.
+// Translates scancodes to ASCII and pushes each character into the tty
+// service's input queue via a VFS tty_input message. The kernel is not
+// in the keyboard data path — only IRQ delivery and I/O port access.
 
 const syscall = @import("syscall");
+const vfs = @import("vfs");
+
+pub const proc_name: []const u8 = "kbd";
 
 /// Capability slots (assigned by kernel when driver is loaded)
 const IRQ_CAP: u32 = 0; // IRQ 1 capability
 const IOPORT_CAP: u32 = 1; // I/O ports 0x60-0x64 capability
+const KBD_INPUT_CAP: u32 = vfs.KBD_INPUT_SLOT; // SEND on KBD_INPUT endpoint to shell
 
 /// PS/2 Controller ports
 const DATA_PORT: u16 = 0x60;
@@ -67,6 +74,13 @@ fn scancodeToAscii(scancode: u8) u8 {
     return 0;
 }
 
+/// Send a single ASCII byte to the shell via the KBD_INPUT endpoint.
+/// Uses capSend (fire-and-forget) — the shell's capRecv will drain it.
+fn sendToShell(ch: u8) void {
+    const buf = [_]u8{ch};
+    _ = syscall.capSend(KBD_INPUT_CAP, &buf, 1);
+}
+
 /// Drain any bytes left in the 8042 output buffer (UEFI may leave junk,
 /// and mouse events would otherwise sit ahead of keystrokes in the FIFO).
 fn drainOutputBuffer() void {
@@ -81,7 +95,7 @@ fn drainOutputBuffer() void {
 
 /// Main entry point for keyboard driver
 pub fn main() i32 {
-    syscall.print("kbd: driver started\n");
+    syscall.klogStr("kbd: driver started\n");
 
     // Disable the mouse port and drain stale bytes so the kbd FIFO
     // only contains keyboard scancodes from here on.
@@ -91,7 +105,7 @@ pub fn main() i32 {
     while (true) {
         const wait_result = syscall.irqWait(IRQ_CAP);
         if (wait_result < 0) {
-            syscall.print("kbd: irqWait failed\n");
+            syscall.klogStr("kbd: irqWait failed\n");
             break;
         }
 
@@ -140,21 +154,15 @@ pub fn main() i32 {
 
         // Backspace
         if (scancode == SC_BACKSPACE) {
-            // Send backspace to buffer and echo to screen
-            _ = syscall.kbdPutchar(8);
-            const buf = [_]u8{8};
-            _ = syscall.debugPrint(&buf);
+            sendToShell(8);
             _ = syscall.irqAck(IRQ_CAP);
             continue;
         }
 
-        // Regular key - convert, send to buffer, and echo to screen
+        // Regular key — push to the tty input queue. Echoing back to
+        // the screen is the shell's responsibility (raw-mode style).
         const ascii = scancodeToAscii(scancode);
-        if (ascii != 0) {
-            _ = syscall.kbdPutchar(ascii);
-            const buf = [_]u8{ascii};
-            _ = syscall.debugPrint(&buf);
-        }
+        if (ascii != 0) sendToShell(ascii);
 
         _ = syscall.irqAck(IRQ_CAP);
     }

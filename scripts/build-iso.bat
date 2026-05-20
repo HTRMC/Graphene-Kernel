@@ -77,6 +77,12 @@ if exist "zig-out\bin\fatfs" (
     echo Copied fatfs service to ISO
 )
 
+:: Copy tty service (if it exists)
+if exist "zig-out\bin\tty" (
+    copy "zig-out\bin\tty" "%ISO_ROOT%\boot\tty"
+    echo Copied tty service to ISO
+)
+
 :: Copy Limine config
 copy "limine.conf" "%ISO_ROOT%\boot\limine\limine.conf"
 

@@ -5,6 +5,15 @@ const std = @import("std");
 const syscall = @import("syscall");
 const main_module = @import("main");
 
+// Optional per-process name. Programs may declare:
+//   pub const proc_name: []const u8 = "name";
+// and start.zig's panic handler will include it in the user-panic log
+// so we can tell which process aborted.
+const proc_name: []const u8 = if (@hasDecl(main_module, "proc_name"))
+    main_module.proc_name
+else
+    "user";
+
 fn refAllRecursive(comptime T: type) void {
     switch (@typeInfo(T)) {
         .@"struct", .@"enum", .@"union", .@"opaque" => {},
@@ -35,11 +44,10 @@ export fn _start() callconv(.c) noreturn {
 
 /// Panic handler for Zig runtime in user space
 pub fn panic(msg: []const u8, _: ?*@import("std").builtin.StackTrace, _: ?usize) noreturn {
-    // Print panic message
-    _ = syscall.debugPrint("USER PANIC: ");
-    _ = syscall.debugPrint(msg);
-    _ = syscall.debugPrint("\n");
-
-    // Exit with error code
+    _ = syscall.klog("USER PANIC [");
+    _ = syscall.klog(proc_name);
+    _ = syscall.klog("]: ");
+    _ = syscall.klog(msg);
+    _ = syscall.klog("\n");
     syscall.processExit(1);
 }
