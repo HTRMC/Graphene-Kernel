@@ -10,6 +10,14 @@ const IOPORT_CAP: u32 = 1; // I/O ports 0x60-0x64 capability
 /// PS/2 Controller ports
 const DATA_PORT: u16 = 0x60;
 const STATUS_PORT: u16 = 0x64;
+const COMMAND_PORT: u16 = 0x64;
+
+/// PS/2 status register bits
+const STATUS_OBF: u8 = 0x01; // output buffer has data
+const STATUS_AUX: u8 = 0x20; // data came from second port (mouse)
+
+/// PS/2 controller commands written to 0x64
+const CMD_DISABLE_AUX: u8 = 0xA7; // disable second PS/2 port (mouse)
 
 /// Special scancodes
 const SC_BACKSPACE: u8 = 0x0E;
@@ -59,15 +67,43 @@ fn scancodeToAscii(scancode: u8) u8 {
     return 0;
 }
 
+/// Drain any bytes left in the 8042 output buffer (UEFI may leave junk,
+/// and mouse events would otherwise sit ahead of keystrokes in the FIFO).
+fn drainOutputBuffer() void {
+    var safety: u32 = 0;
+    while (safety < 128) : (safety += 1) {
+        const status = syscall.ioPortRead(IOPORT_CAP, STATUS_PORT, 1);
+        if (status < 0) return;
+        if ((@as(u8, @truncate(@as(u64, @bitCast(status)))) & STATUS_OBF) == 0) return;
+        _ = syscall.ioPortRead(IOPORT_CAP, DATA_PORT, 1);
+    }
+}
+
 /// Main entry point for keyboard driver
 pub fn main() i32 {
     syscall.print("kbd: driver started\n");
+
+    // Disable the mouse port and drain stale bytes so the kbd FIFO
+    // only contains keyboard scancodes from here on.
+    _ = syscall.ioPortWrite(IOPORT_CAP, COMMAND_PORT, CMD_DISABLE_AUX, 1);
+    drainOutputBuffer();
 
     while (true) {
         const wait_result = syscall.irqWait(IRQ_CAP);
         if (wait_result < 0) {
             syscall.print("kbd: irqWait failed\n");
             break;
+        }
+
+        // If the byte came from the second port (mouse), ignore it.
+        const status_r = syscall.ioPortRead(IOPORT_CAP, STATUS_PORT, 1);
+        if (status_r >= 0) {
+            const status: u8 = @truncate(@as(u64, @bitCast(status_r)));
+            if ((status & STATUS_AUX) != 0) {
+                _ = syscall.ioPortRead(IOPORT_CAP, DATA_PORT, 1);
+                _ = syscall.irqAck(IRQ_CAP);
+                continue;
+            }
         }
 
         const scancode_result = syscall.ioPortRead(IOPORT_CAP, DATA_PORT, 1);
