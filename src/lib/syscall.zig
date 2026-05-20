@@ -33,14 +33,13 @@ pub const SyscallNumber = enum(u64) {
     process_exit = 12,
     irq_wait = 13,
     irq_ack = 14,
-    debug_print = 15,
-    // Extensions
+    // 15 retired (was debug_print) — user-space talks to tty for output.
     cap_info = 16, // Get capability info
     process_info = 17, // Get process info
     io_port_read = 18, // Read from I/O port
     io_port_write = 19, // Write to I/O port
-    kbd_putchar = 20, // Keyboard driver sends character
-    getchar = 21, // Read character from keyboard buffer (blocking)
+    // 20 retired (was kbd_putchar) — kbd uses IPC to push to shell.
+    // 21 retired (was getchar) — shell reads input via the kbd IPC endpoint.
     endpoint_create = 22, // Create IPC endpoint
     channel_create = 23, // Create IPC channel (bidirectional)
     process_count = 24, // Get count of active processes
@@ -279,13 +278,10 @@ fn dispatch(num: u64, args: [6]u64) i64 {
         .process_exit => sysProcessExit(args),
         .irq_wait => sysIrqWait(args),
         .irq_ack => sysIrqAck(args),
-        .debug_print => sysDebugPrint(args),
         .cap_info => sysCapInfo(args),
         .process_info => sysProcessInfo(args),
         .io_port_read => sysIoPortRead(args),
         .io_port_write => sysIoPortWrite(args),
-        .kbd_putchar => sysKbdPutchar(args),
-        .getchar => sysGetchar(args),
         .endpoint_create => sysEndpointCreate(args),
         .channel_create => sysChannelCreate(args),
         .process_count => sysProcessCount(args),
@@ -909,75 +905,9 @@ fn sysFbInfo(args: [6]u64) i64 {
     return @intFromEnum(SyscallError.success);
 }
 
-/// Debug print position (advances inline, only newline moves to next line)
-/// Starts at Y=450 to avoid overlapping with kernel init messages (Y=150-430)
-/// Wraps at Y=620 to avoid panic area (Y=640+)
-var debug_x: u32 = 10;
-var debug_y: u32 = 450;
-
-fn sysDebugPrint(args: [6]u64) i64 {
-    // debug_print(str_ptr, str_len)
-    const str_ptr = args[0];
-    const str_len = args[1];
-
-    if (str_len > 1024) {
-        return @intFromEnum(SyscallError.invalid_argument);
-    }
-
-    // Validate user buffer
-    if (!usermode.isUserAddress(str_ptr) or !usermode.isUserAddress(str_ptr + str_len - 1)) {
-        return @intFromEnum(SyscallError.invalid_argument);
-    }
-
-    // Get string from user space
-    const str: [*]const u8 = @ptrFromInt(str_ptr);
-    const slice = str[0..@min(str_len, 256)];
-
-    // Also print to serial console
-    serial.puts(slice);
-
-    // Print to framebuffer - continue from current position
-    for (slice) |c| {
-        if (c == '\n') {
-            debug_x = 10;
-            debug_y += 16;
-        } else if (c == 8) {
-            // Backspace - move cursor back and clear character
-            if (debug_x > 10) {
-                debug_x -= 8;
-                // Clear the character by drawing a space (background color)
-                framebuffer.putChar(' ', debug_x, debug_y, 0x001a1a2e);
-            }
-        } else if (c >= 32 and c < 127) {
-            framebuffer.putChar(c, debug_x, debug_y, 0x0000ff00); // Green for user output
-            debug_x += 8;
-            if (debug_x > 780) {
-                debug_x = 10;
-                debug_y += 16;
-            }
-        }
-
-        // Check for Y overflow after any line advance
-        if (debug_y > 620) {
-            clearUserOutputArea();
-            debug_x = 10;
-            debug_y = 450;
-        }
-    }
-
-    return @intCast(str_len);
-}
-
-/// Clear the user output area (Y 450-620) to prepare for wrap-around
-fn clearUserOutputArea() void {
-    var py: u32 = 450;
-    while (py < 630) : (py += 1) {
-        var px: u32 = 0;
-        while (px < 800) : (px += 1) {
-            framebuffer.putPixel(px, py, 0x001a1a2e);
-        }
-    }
-}
+// sysDebugPrint + clearUserOutputArea were removed with the
+// debug_print syscall. Shell→tty owns user output; klog handles
+// kernel/service diagnostics on serial.
 
 fn sysCapInfo(args: [6]u64) i64 {
     // cap_info(slot, result_ptr) -> fill CapInfoResult for the cap
@@ -1227,63 +1157,10 @@ fn sysIoPortWrite(args: [6]u64) i64 {
     return @intFromEnum(SyscallError.success);
 }
 
-// ============================================================================
-// Keyboard Input Buffer (for shell input)
-// ============================================================================
-
-const KBD_BUFFER_SIZE: usize = 256;
-var kbd_buffer: [KBD_BUFFER_SIZE]u8 = undefined;
-var kbd_read_pos: usize = 0;
-var kbd_write_pos: usize = 0;
-var kbd_count: usize = 0;
-var kbd_wait_queue: thread.WaitQueue = .{};
-
-fn sysKbdPutchar(args: [6]u64) i64 {
-    // kbd_putchar(char) - keyboard driver sends a character to the buffer
-    const c: u8 = @truncate(args[0]);
-
-    // Only allow driver processes to call this
-    const proc = process.getCurrentProcess() orelse {
-        return @intFromEnum(SyscallError.permission_denied);
-    };
-    if (!proc.flags.driver_process) {
-        return @intFromEnum(SyscallError.permission_denied);
-    }
-
-    // Check if buffer is full
-    if (kbd_count >= KBD_BUFFER_SIZE) {
-        return @intFromEnum(SyscallError.would_block);
-    }
-
-    // Add character to buffer
-    kbd_buffer[kbd_write_pos] = c;
-    kbd_write_pos = (kbd_write_pos + 1) % KBD_BUFFER_SIZE;
-    kbd_count += 1;
-
-    // Wake up any waiting reader
-    if (kbd_wait_queue.dequeue()) |waiting_thread| {
-        scheduler.wake(waiting_thread);
-    }
-
-    return @intFromEnum(SyscallError.success);
-}
-
-fn sysGetchar(args: [6]u64) i64 {
-    // getchar() - read a character from keyboard buffer, blocks if empty
-    _ = args;
-
-    // If buffer is empty, block until a character is available
-    while (kbd_count == 0) {
-        scheduler.blockCurrent(&kbd_wait_queue);
-    }
-
-    // Read character from buffer
-    const c = kbd_buffer[kbd_read_pos];
-    kbd_read_pos = (kbd_read_pos + 1) % KBD_BUFFER_SIZE;
-    kbd_count -= 1;
-
-    return @as(i64, c);
-}
+// kbd_buffer / sysKbdPutchar / sysGetchar were removed once the kbd
+// driver started pushing characters straight to the shell over IPC
+// (KBD_INPUT endpoint). The kernel is no longer in the keyboard data
+// path — input flows kbd → shell, output flows shell → tty.
 
 // ============================================================================
 // IPC Endpoint/Channel Creation
@@ -1501,13 +1378,10 @@ pub fn getName(num: u64) []const u8 {
         .process_exit => "process_exit",
         .irq_wait => "irq_wait",
         .irq_ack => "irq_ack",
-        .debug_print => "debug_print",
         .cap_info => "cap_info",
         .process_info => "process_info",
         .io_port_read => "io_port_read",
         .io_port_write => "io_port_write",
-        .kbd_putchar => "kbd_putchar",
-        .getchar => "getchar",
         .endpoint_create => "endpoint_create",
         .channel_create => "channel_create",
         .process_count => "process_count",

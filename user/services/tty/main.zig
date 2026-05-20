@@ -27,7 +27,7 @@ const FB_CAP: u32 = 7;
 
 const FB_VADDR: u64 = 0x30000000;
 const GLYPH_W: u32 = 8;
-const GLYPH_H: u32 = 8;
+const GLYPH_H: u32 = 16;
 const FG: u32 = 0x00FFFFFF;
 const BG: u32 = 0x001A1A2E;
 const STATUS_FG: u32 = 0x00808080;
@@ -88,9 +88,10 @@ fn drawGlyph(c: u8, col: u32, row: u32) void {
     const glyph = font_data[c - 32];
     var ry: u32 = 0;
     while (ry < GLYPH_H) : (ry += 1) {
+        const row_bits = glyph[ry];
         var rx: u32 = 0;
         while (rx < GLYPH_W) : (rx += 1) {
-            const on = ((glyph[ry] >> @intCast(7 - rx)) & 1) == 1;
+            const on = ((row_bits >> @intCast(7 - rx)) & 1) == 1;
             putPixel(x0 + rx, y0 + ry, if (on) FG else BG);
         }
     }

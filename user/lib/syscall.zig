@@ -18,13 +18,12 @@ pub const SyscallNumber = enum(u64) {
     process_exit = 12,
     irq_wait = 13,
     irq_ack = 14,
-    debug_print = 15,
+    // 15, 20, 21 retired (was debug_print / kbd_putchar / getchar) —
+    // shell now uses tty + KBD_INPUT IPC for terminal I/O.
     cap_info = 16,
     process_info = 17,
     io_port_read = 18,
     io_port_write = 19,
-    kbd_putchar = 20,
-    getchar = 21,
     endpoint_create = 22,
     channel_create = 23,
     process_count = 24,
@@ -124,14 +123,9 @@ inline fn syscall5(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) i64 {
 // High-level syscall wrappers
 // ============================================================================
 
-/// Print a debug message to the kernel console
-pub fn debugPrint(msg: []const u8) i64 {
-    return syscall2(
-        @intFromEnum(SyscallNumber.debug_print),
-        @intFromPtr(msg.ptr),
-        msg.len,
-    );
-}
+// debugPrint was removed with the debug_print syscall. Use `klog` for
+// serial-only kernel logging or write to the tty service for screen
+// output.
 
 /// Exit the current thread
 pub fn threadExit(code: i32) noreturn {
@@ -265,10 +259,8 @@ pub fn ioPortWrite(cap_slot: u32, port: u16, value: u32, width: u8) i64 {
 // Helper functions
 // ============================================================================
 
-/// Print a string literal (compile-time known)
-pub fn print(comptime msg: []const u8) void {
-    _ = debugPrint(msg);
-}
+// `print` was removed alongside debugPrint. Comptime-string callers
+// should use klogStr (serial-only) or build their own tty write helper.
 
 /// Check if syscall result is an error
 pub fn isError(result: i64) bool {
@@ -281,15 +273,8 @@ pub fn toError(result: i64) ?SyscallError {
     return @enumFromInt(result);
 }
 
-/// Send a character to the keyboard buffer (driver only)
-pub fn kbdPutchar(c: u8) i64 {
-    return syscall1(@intFromEnum(SyscallNumber.kbd_putchar), c);
-}
-
-/// Read a character from keyboard buffer (blocks if empty)
-pub fn getchar() i64 {
-    return syscall0(@intFromEnum(SyscallNumber.getchar));
-}
+// kbdPutchar / getchar removed — kbd pushes scancodes directly to the
+// shell over the KBD_INPUT endpoint (capSend / capRecv on slot 8).
 
 // ============================================================================
 // IPC Functions
