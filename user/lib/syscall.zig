@@ -33,6 +33,7 @@ pub const SyscallNumber = enum(u64) {
     dma_alloc = 28,
     klog = 29,
     fb_info = 30,
+    cap_try_recv = 31,
 };
 
 /// Syscall error codes
@@ -184,6 +185,17 @@ pub fn capSend(cap_slot: u32, msg_ptr: [*]const u8, msg_len: usize) i64 {
 pub fn capRecv(cap_slot: u32, buf_ptr: [*]u8, buf_len: usize) i64 {
     return syscall3(
         @intFromEnum(SyscallNumber.cap_recv),
+        cap_slot,
+        @intFromPtr(buf_ptr),
+        buf_len,
+    );
+}
+
+/// Non-blocking receive. Returns -would_block (-6) if no message ready,
+/// otherwise the message length (and copies bytes into buf).
+pub fn capTryRecv(cap_slot: u32, buf_ptr: [*]u8, buf_len: usize) i64 {
+    return syscall3(
+        @intFromEnum(SyscallNumber.cap_try_recv),
         cap_slot,
         @intFromPtr(buf_ptr),
         buf_len,

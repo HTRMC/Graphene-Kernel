@@ -9,9 +9,11 @@ pub const proc_name: []const u8 = "shell";
 
 // ---------------------------------------------------------------------------
 // Shell I/O goes through the tty service via the shared TTY endpoint.
-// Output: a write op renders the bytes onto the framebuffer.
-// Input: a read op pulls characters from tty's input queue (filled by
-// the kbd driver). Reads are non-blocking — we yield and retry.
+// Output: a write op renders the bytes onto the framebuffer AND mirrors
+// to serial (handled inside tty). Input: a read op pulls one byte from
+// tty's input queue, which is fed by both kbd (PS/2) and serial (UART).
+// Reads are non-blocking — tty returns size=0 when empty, we yield and
+// retry. tty is now the single source of truth for line input.
 // ---------------------------------------------------------------------------
 fn ttyWrite(data: []const u8) void {
     if (data.len == 0) return;
@@ -23,11 +25,15 @@ fn ttyPrint(comptime msg: []const u8) void {
     ttyWrite(msg);
 }
 
+/// Pull one byte from tty's input queue, or -1 if empty. Tty's .read
+/// op replies with size=0 when the queue is empty (non-blocking); we
+/// surface that as -1 so readLine can yield and retry.
 fn ttyGetc() i64 {
-    var buf: [16]u8 = undefined;
-    const n = syscall.capRecv(vfs.KBD_INPUT_SLOT, &buf, buf.len);
-    if (n <= 0) return -1;
-    return @as(i64, buf[0]);
+    var reply_buf: [@sizeOf(vfs.ResponseHeader) + 4]u8 = undefined;
+    const result = vfs.callSlot(vfs.TTY_CAP_SLOT, .read, "", 0, 1, &.{}, &reply_buf);
+    if (result.err != .success) return -1;
+    if (result.payload.len == 0) return -1;
+    return @as(i64, result.payload[0]);
 }
 
 /// Command buffer
@@ -771,8 +777,10 @@ fn readLine() []const u8 {
     while (true) {
         const result = ttyGetc();
         if (result < 0) {
-            // Error - return what we have
-            break;
+            // Queue empty — yield once and try again. tty.read is
+            // non-blocking by design so the shell drives its own pacing.
+            syscall.threadYield();
+            continue;
         }
 
         const c: u8 = @truncate(@as(u64, @bitCast(result)));

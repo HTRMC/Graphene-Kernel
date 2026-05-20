@@ -31,11 +31,22 @@ pub const FATFS_CAP_SLOT: u32 = 5;
 /// holds HANDLE. Input from the keyboard goes via KBD_INPUT below.
 pub const TTY_CAP_SLOT: u32 = 6;
 
-/// Keyboard-to-shell input endpoint. kbd holds SEND and pushes one
-/// character per scancode; shell holds HANDLE and reads via capRecv.
-/// Using a dedicated endpoint avoids the multi-client recv-queue race
-/// that a single shared TTY endpoint creates.
-pub const KBD_INPUT_SLOT: u32 = 8;
+/// Input-to-tty endpoint. Async-mode, fire-and-forget. kbd and serial
+/// both hold SEND and push received bytes here as `.tty_input` ops;
+/// tty holds HANDLE and drains it via cap_try_recv between shell
+/// requests. Keeping this separate from TTY_CAP_SLOT prevents kbd or
+/// serial from accidentally direct-handing-off into shell's recv_queue
+/// while shell is parked waiting for a TTY reply — a race that
+/// otherwise mis-parses a `.tty_input` request as a ResponseHeader and
+/// blows up @enumFromInt.
+pub const TTY_INPUT_SLOT: u32 = 8;
+
+/// Serial (16550 UART) service endpoint. The serial service holds
+/// HANDLE; tty holds SEND so it can mirror writes onto COM1 via the
+/// `.write` op. Async-mode so tty's fan-out is non-blocking
+/// (best-effort, the goal is testability over a hosted -serial stdio
+/// pipe, not flow-controlled output).
+pub const SERIAL_CAP_SLOT: u32 = 9;
 
 /// Filesystem operation codes
 pub const FsOp = enum(u8) {

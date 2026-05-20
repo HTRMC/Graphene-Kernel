@@ -454,6 +454,43 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(tty);
 
     // ========================================
+    // User space: serial (16550 UART) service
+    // ========================================
+    const serial_main_module = b.createModule(.{
+        .root_source_file = b.path("user/services/serial/main.zig"),
+        .target = user_target,
+        .optimize = .ReleaseSafe,
+        .strip = true,
+        .imports = &.{
+            .{ .name = "syscall", .module = syscall_module },
+            .{ .name = "vfs", .module = vfs_module },
+        },
+    });
+
+    const serial_module = b.createModule(.{
+        .root_source_file = b.path("user/lib/start.zig"),
+        .target = user_target,
+        .optimize = .ReleaseSafe,
+        .strip = true,
+        .unwind_tables = .none,
+        .imports = &.{
+            .{ .name = "syscall", .module = syscall_module },
+            .{ .name = "main", .module = serial_main_module },
+        },
+    });
+
+    serial_module.red_zone = false;
+
+    const serial_svc = b.addExecutable(.{
+        .name = "serial",
+        .root_module = serial_module,
+    });
+
+    serial_svc.setLinkerScript(b.path("user/linker-user.ld"));
+
+    b.installArtifact(serial_svc);
+
+    // ========================================
     // Build ISO step
     // ========================================
     const iso_cmd = b.addSystemCommand(&.{
@@ -481,4 +518,16 @@ pub fn build(b: *std.Build) void {
 
     const run_step = b.step("run", "Build ISO and run in QEMU");
     run_step.dependOn(&qemu_cmd.step);
+
+    // ========================================
+    // test-shell: pipe a fixture into the shell over -serial stdio,
+    // assert expected substrings appear in the output.
+    // ========================================
+    const test_shell_cmd = b.addSystemCommand(&.{
+        "cmd", "/c", "scripts\\test-shell.bat",
+    });
+    test_shell_cmd.step.dependOn(iso_step);
+
+    const test_shell_step = b.step("test-shell", "Run shell over serial with a fixture and grep DONE");
+    test_shell_step.dependOn(&test_shell_cmd.step);
 }

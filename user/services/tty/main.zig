@@ -24,6 +24,12 @@ pub const proc_name: []const u8 = "tty";
 
 const TTY_CAP: u32 = vfs.TTY_CAP_SLOT;
 const FB_CAP: u32 = 7;
+const SERIAL_CAP: u32 = vfs.SERIAL_CAP_SLOT;
+const INPUT_CAP: u32 = vfs.TTY_INPUT_SLOT;
+
+/// Mirror writes to the serial service. Set false to disable the
+/// fan-out for performance-sensitive demos. Default-on per the goal.
+var serial_mirror_enabled: bool = true;
 
 const FB_VADDR: u64 = 0x30000000;
 const GLYPH_W: u32 = 8;
@@ -155,6 +161,40 @@ fn putc(c: u8) void {
 
 fn writeBytes(data: []const u8) void {
     for (data) |c| putc(c);
+    if (serial_mirror_enabled and data.len > 0) mirrorToSerial(data);
+}
+
+/// Forward a slice of output bytes to the serial service via a .write
+/// VFS op. Best-effort: SERIAL_CAP is async-mode, so capSend just
+/// enqueues and never blocks; if the cap is missing (boot order race
+/// or testing with serial disabled), capSend returns negative and we
+/// disable the mirror so subsequent writes don't keep paying the cost.
+fn mirrorToSerial(data: []const u8) void {
+    const hdr_sz = @sizeOf(vfs.RequestHeader);
+    const max_data = vfs.MAX_MSG_DATA - hdr_sz;
+    var off: usize = 0;
+    while (off < data.len) {
+        const chunk_len = @min(max_data, data.len - off);
+        var buf: [vfs.MAX_MSG_DATA]u8 = undefined;
+        const hdr: *vfs.RequestHeader = @ptrCast(@alignCast(&buf));
+        hdr.* = .{
+            .op = @intFromEnum(vfs.FsOp.write),
+            .flags = 0,
+            .name_len = 0,
+            ._pad = 0,
+            .offset = 0,
+            .size = @intCast(chunk_len),
+        };
+        for (0..chunk_len) |i| buf[hdr_sz + i] = data[off + i];
+        const r = syscall.capSend(SERIAL_CAP, &buf, hdr_sz + chunk_len);
+        if (r < 0) {
+            // -2 invalid_capability or -7 not_found = mirror not wired
+            // yet; permanently disable so we don't spam syscalls.
+            if (r == -2 or r == -7) serial_mirror_enabled = false;
+            return;
+        }
+        off += chunk_len;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -233,9 +273,12 @@ fn handleRequest(req_data: []const u8, resp_data: []u8) usize {
             return hdr_sz + n;
         },
         .tty_input => {
+            // Fire-and-forget: callers (kbd, serial) use capSend and do
+            // not wait for a reply. Return 0 to signal the main loop
+            // not to send anything back — keeps the endpoint's send_queue
+            // clear and avoids any "stale reply" race vs shell's capCall.
             for (data) |c| inqPush(c);
-            resp.* = .{ .error_code = 0, .size = @intCast(data.len) };
-            return hdr_sz;
+            return 0;
         },
         .stat => {
             resp.* = .{ .error_code = 0, .size = @sizeOf(vfs.FileStat) };
@@ -258,6 +301,28 @@ fn handleRequest(req_data: []const u8, resp_data: []u8) usize {
     }
 }
 
+/// Pull every queued `.tty_input` off the async input endpoint and
+/// enqueue the bytes into our input ring. kbd and serial both push
+/// here via capSend; we drain on each main-loop iteration so the bytes
+/// are visible the next time shell asks for a `.read`.
+fn drainInput() void {
+    var buf: [vfs.MAX_MSG_DATA]u8 = undefined;
+    while (true) {
+        const n = syscall.capTryRecv(INPUT_CAP, &buf, buf.len);
+        if (n < 0) return;
+        if (n == 0) continue;
+        const ulen: usize = @intCast(n);
+        if (ulen < @sizeOf(vfs.RequestHeader)) continue;
+        const hdr: *const vfs.RequestHeader = @ptrCast(@alignCast(&buf));
+        // Only honor `.tty_input` requests; ignore any unexpected op
+        // rather than panicking via @enumFromInt.
+        if (hdr.op != @intFromEnum(vfs.FsOp.tty_input)) continue;
+        const data_off = @sizeOf(vfs.RequestHeader) + hdr.name_len;
+        if (ulen <= data_off) continue;
+        for (buf[data_off..ulen]) |c| inqPush(c);
+    }
+}
+
 pub fn main() i32 {
     _ = syscall.klog("[tty] starting...\n");
     if (!mount()) return 1;
@@ -267,13 +332,23 @@ pub fn main() i32 {
     var resp_buf: [vfs.MAX_MSG_DATA]u8 = undefined;
 
     while (true) {
+        // Pull any pending input bytes before parking on TTY_CAP so
+        // shell's next .read sees fresh data with no extra round-trip.
+        drainInput();
+
         const recv_len = syscall.capRecv(TTY_CAP, &req_buf, req_buf.len);
         if (recv_len < 0) {
             syscall.threadYield();
             continue;
         }
         const req_slice = req_buf[0..@intCast(recv_len)];
+        // Drain again after waking — between the previous drain and
+        // now, kbd or serial may have queued more bytes that the
+        // pending .read should be able to observe.
+        drainInput();
         const resp_len = handleRequest(req_slice, &resp_buf);
-        _ = syscall.capSend(TTY_CAP, &resp_buf, resp_len);
+        if (resp_len > 0) {
+            _ = syscall.capSend(TTY_CAP, &resp_buf, resp_len);
+        }
     }
 }

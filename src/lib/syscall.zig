@@ -49,6 +49,7 @@ pub const SyscallNumber = enum(u64) {
     dma_alloc = 28, // Driver-only: allocate contiguous DMA buffer
     klog = 29, // Serial-only kernel log (no framebuffer)
     fb_info = 30, // Query framebuffer geometry
+    cap_try_recv = 31, // Non-blocking cap_recv variant
     _,
 };
 
@@ -291,6 +292,7 @@ fn dispatch(num: u64, args: [6]u64) i64 {
         .dma_alloc => sysDmaAlloc(args),
         .klog => sysKlog(args),
         .fb_info => sysFbInfo(args),
+        .cap_try_recv => sysCapTryRecv(args),
         _ => @intFromEnum(SyscallError.invalid_syscall),
     };
 }
@@ -416,6 +418,56 @@ fn sysCapRecv(args: [6]u64) i64 {
     }
 
     // Return length of received message
+    return @intCast(data.len);
+}
+
+/// Non-blocking cap_recv. Returns -would_block when no message ready
+/// (no pending message and no parked sender). Otherwise behaves like
+/// cap_recv: returns the message length and copies into the user buf.
+fn sysCapTryRecv(args: [6]u64) i64 {
+    const cap_slot: capability.CapSlot = @truncate(args[0]);
+    const buf_ptr = args[1];
+    const buf_len = args[2];
+
+    const proc = process.getCurrentProcess() orelse {
+        return @intFromEnum(SyscallError.invalid_capability);
+    };
+    const cap_table = proc.cap_table orelse {
+        return @intFromEnum(SyscallError.invalid_capability);
+    };
+
+    if (buf_len > 0) {
+        if (!usermode.isUserAddress(buf_ptr) or !usermode.isUserAddress(buf_ptr + buf_len - 1)) {
+            return @intFromEnum(SyscallError.invalid_argument);
+        }
+    }
+
+    const obj = capability.lookup(cap_table, cap_slot, .ipc_endpoint, capability.Rights.HANDLE) catch |err| {
+        return switch (err) {
+            capability.CapError.InvalidSlot => @intFromEnum(SyscallError.invalid_capability),
+            capability.CapError.InvalidCapability => @intFromEnum(SyscallError.invalid_capability),
+            capability.CapError.TypeMismatch => @intFromEnum(SyscallError.type_mismatch),
+            capability.CapError.InsufficientRights => @intFromEnum(SyscallError.permission_denied),
+            else => @intFromEnum(SyscallError.invalid_argument),
+        };
+    };
+    const endpoint: *ipc.Endpoint = @alignCast(@fieldParentPtr("base", obj));
+
+    var msg = ipc.Message{};
+    const got = ipc.tryRecv(endpoint, &msg, cap_table) catch |err| {
+        return switch (err) {
+            ipc.IpcError.EndpointClosed => @intFromEnum(SyscallError.not_found),
+            else => @intFromEnum(SyscallError.invalid_argument),
+        };
+    };
+    if (!got) return @intFromEnum(SyscallError.would_block);
+
+    const data = msg.getData();
+    const copy_len = @min(data.len, buf_len);
+    if (copy_len > 0) {
+        const user_buf: [*]u8 = @ptrFromInt(buf_ptr);
+        for (0..copy_len) |i| user_buf[i] = data[i];
+    }
     return @intCast(data.len);
 }
 
@@ -1391,6 +1443,7 @@ pub fn getName(num: u64) []const u8 {
         .dma_alloc => "dma_alloc",
         .klog => "klog",
         .fb_info => "fb_info",
+        .cap_try_recv => "cap_try_recv",
         _ => "unknown",
     };
 }

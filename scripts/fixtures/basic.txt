@@ -1,0 +1,4 @@
+help
+ls /dev
+mount
+echo GRAPHENE_TEST_DONE

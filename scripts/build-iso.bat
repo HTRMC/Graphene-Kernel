@@ -83,6 +83,12 @@ if exist "zig-out\bin\tty" (
     echo Copied tty service to ISO
 )
 
+:: Copy serial service (if it exists)
+if exist "zig-out\bin\serial" (
+    copy "zig-out\bin\serial" "%ISO_ROOT%\boot\serial"
+    echo Copied serial service to ISO
+)
+
 :: Copy Limine config
 copy "limine.conf" "%ISO_ROOT%\boot\limine\limine.conf"
 

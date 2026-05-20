@@ -1,8 +1,9 @@
 // Graphene PS/2 Keyboard Driver
 // User-space driver using IRQ and I/O port capabilities.
 // Translates scancodes to ASCII and pushes each character into the tty
-// service's input queue via a VFS tty_input message. The kernel is not
-// in the keyboard data path — only IRQ delivery and I/O port access.
+// service's input queue via a `.tty_input` VFS op on TTY_CAP_SLOT. The
+// kernel is not in the keyboard data path — only IRQ delivery and I/O
+// port access.
 
 const syscall = @import("syscall");
 const vfs = @import("vfs");
@@ -12,7 +13,7 @@ pub const proc_name: []const u8 = "kbd";
 /// Capability slots (assigned by kernel when driver is loaded)
 const IRQ_CAP: u32 = 0; // IRQ 1 capability
 const IOPORT_CAP: u32 = 1; // I/O ports 0x60-0x64 capability
-const KBD_INPUT_CAP: u32 = vfs.KBD_INPUT_SLOT; // SEND on KBD_INPUT endpoint to shell
+const TTY_INPUT_CAP: u32 = vfs.TTY_INPUT_SLOT; // SEND on async input endpoint to tty
 
 /// PS/2 Controller ports
 const DATA_PORT: u16 = 0x60;
@@ -74,11 +75,22 @@ fn scancodeToAscii(scancode: u8) u8 {
     return 0;
 }
 
-/// Send a single ASCII byte to the shell via the KBD_INPUT endpoint.
-/// Uses capSend (fire-and-forget) — the shell's capRecv will drain it.
+/// Push a single ASCII byte into tty's input queue via the `.tty_input`
+/// op. Uses capSend (fire-and-forget); tty does not reply for tty_input
+/// so this never parks anything in the endpoint's send_queue.
 fn sendToShell(ch: u8) void {
-    const buf = [_]u8{ch};
-    _ = syscall.capSend(KBD_INPUT_CAP, &buf, 1);
+    var buf: [@sizeOf(vfs.RequestHeader) + 1]u8 = undefined;
+    const hdr: *vfs.RequestHeader = @ptrCast(@alignCast(&buf));
+    hdr.* = .{
+        .op = @intFromEnum(vfs.FsOp.tty_input),
+        .flags = 0,
+        .name_len = 0,
+        ._pad = 0,
+        .offset = 0,
+        .size = 1,
+    };
+    buf[@sizeOf(vfs.RequestHeader)] = ch;
+    _ = syscall.capSend(TTY_INPUT_CAP, &buf, buf.len);
 }
 
 /// Drain any bytes left in the 8042 output buffer (UEFI may leave junk,

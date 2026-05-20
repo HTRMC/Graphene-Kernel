@@ -231,6 +231,7 @@ export fn _start() callconv(.c) noreturn {
     var fatfs_proc: ?*process.Process = null;
     var tty_proc: ?*process.Process = null;
     var kbd_proc: ?*process.Process = null;
+    var serial_proc: ?*process.Process = null;
     if (module_request.response) |mod_response| {
         const modules = mod_response.getModules();
         printInfo("Loading boot modules..."); // TODO: make sure this text doesnt overlap. the text Running in user mode!
@@ -290,6 +291,14 @@ export fn _start() callconv(.c) noreturn {
                 // TTY endpoint.
                 tty_proc = loadUserProcessP(module, "tty");
                 if (tty_proc != null) printOk("Loaded: tty (terminal service)");
+            } else if (strEql(module_name, "serial")) {
+                // Load serial as a driver process with IRQ 4 + I/O ports
+                // 0x3F8..0x3FF. Owns COM1; bridges UART RX into tty's
+                // input queue and accepts tty's output mirror via VFS.
+                serial_proc = loadDriverProcess(module, "serial", driver.DriverType.serial, 4, 0x3F8, 8);
+                if (serial_proc != null) {
+                    printOk("Loaded: serial (IRQ 4, ports 0x3F8-0x3FF)");
+                }
             } else {
                 // Unknown module - try to load as generic driver
                 printInfo("Skipping unknown module");
@@ -367,28 +376,55 @@ export fn _start() callconv(.c) noreturn {
             printFail("TTY endpoint wire failed");
         }
     }
-    // KBD_INPUT endpoint: kbd→shell direct channel for keystrokes.
-    // Separate from TTY so kbd's sends never park as "replies" in
-    // shell's TTY recv_queue.
-    if (kbd_proc != null and shell_proc != null) {
-        const kbd_input_ep = ipc.createEndpoint();
-        if (kbd_input_ep) |ep| {
-            const kbd_tbl = kbd_proc.?.cap_table.?;
-            const shell_tbl = shell_proc.?.cap_table.?;
-            capability.insertAt(kbd_tbl, KBD_INPUT_SLOT, &ep.base, capability.Rights{ .send = true }) catch {};
-            capability.insertAt(shell_tbl, KBD_INPUT_SLOT, &ep.base, capability.Rights{ .handle = true }) catch {};
-            if (kbd_tbl.isSlotUsed(KBD_INPUT_SLOT) and shell_tbl.isSlotUsed(KBD_INPUT_SLOT)) {
-                printOk("KBD_INPUT endpoint wired (slot 8)");
-            } else {
-                printFail("KBD_INPUT endpoint wire failed");
-            }
-        }
-    }
+    // devfs still uses TTY_CAP_SLOT for /dev/tty0 forwarding (it does
+    // not race because devfs only sends in response to shell requests,
+    // never asynchronously into shell's parked recv).
     if (tty_endpoint != null and devfs_proc != null) {
         if (grantSendCap(devfs_proc.?, tty_endpoint.?, TTY_CAP_SLOT)) {
             printOk("TTY send cap granted to devfs");
         } else {
             printFail("TTY send cap grant to devfs failed");
+        }
+    }
+
+    // TTY_INPUT endpoint (async): tty HANDLE, kbd+serial SEND. This is
+    // the fire-and-forget channel for `.tty_input` so async pushes from
+    // kbd/serial cannot direct-hand-off into shell's parked recv on
+    // TTY_CAP_SLOT (a race that mis-parsed a request as a reply).
+    if (tty_proc != null and kbd_proc != null) {
+        const input_ep = ipc.createEndpoint();
+        if (input_ep) |ep| {
+            ep.flags.async_mode = true;
+            const tty_tbl = tty_proc.?.cap_table.?;
+            const kbd_tbl = kbd_proc.?.cap_table.?;
+            capability.insertAt(tty_tbl, TTY_INPUT_SLOT, &ep.base, capability.Rights{ .handle = true }) catch {};
+            capability.insertAt(kbd_tbl, TTY_INPUT_SLOT, &ep.base, capability.Rights{ .send = true }) catch {};
+            if (tty_tbl.isSlotUsed(TTY_INPUT_SLOT) and kbd_tbl.isSlotUsed(TTY_INPUT_SLOT)) {
+                printOk("TTY_INPUT endpoint wired (slot 8, async)");
+                // Also grant serial a SEND cap on the same endpoint.
+                if (serial_proc) |sp| {
+                    if (grantSendCap(sp, ep, TTY_INPUT_SLOT)) {
+                        printOk("TTY_INPUT send cap granted to serial");
+                    } else {
+                        printFail("TTY_INPUT send cap grant to serial failed");
+                    }
+                }
+            } else {
+                printFail("TTY_INPUT endpoint wire failed");
+            }
+        }
+    }
+
+    // Wire SERIAL endpoint: serial gets HANDLE, tty gets SEND, at
+    // SERIAL_CAP_SLOT. Async-mode so tty's write fan-out never blocks
+    // — bytes pile in the pending ring until serial's poll loop drains.
+    if (serial_proc != null and tty_proc != null) {
+        const serial_endpoint = wireServiceEndpoint(serial_proc.?, tty_proc.?, SERIAL_CAP_SLOT);
+        if (serial_endpoint) |ep| {
+            ep.flags.async_mode = true;
+            printOk("SERIAL endpoint wired (slot 9, async)");
+        } else {
+            printFail("SERIAL endpoint wire failed");
         }
     }
 
@@ -571,7 +607,12 @@ const BLK_CAP_SLOT: u32 = 4;
 const FATFS_CAP_SLOT: u32 = 5;
 const TTY_CAP_SLOT: u32 = 6;
 const FB_CAP_SLOT: u32 = 7;
-const KBD_INPUT_SLOT: u32 = 8;
+/// Async tty-input endpoint. tty holds HANDLE; kbd and serial hold
+/// SEND and push `.tty_input` requests fire-and-forget. Kept off the
+/// shell↔tty (TTY_CAP_SLOT) endpoint so kbd/serial sends never
+/// direct-hand-off into shell's parked recv for a TTY reply.
+const TTY_INPUT_SLOT: u32 = 8;
+const SERIAL_CAP_SLOT: u32 = 9;
 
 /// Create a VFS endpoint and inject the cap into ramfs (HANDLE) and shell (SEND).
 fn wireVfsEndpoint(ramfs: *process.Process, shell: *process.Process) bool {
