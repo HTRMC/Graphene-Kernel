@@ -104,7 +104,12 @@ pub const ProcessFlags = packed struct(u8) {
     kernel_process: bool = false, // Kernel-only process
     init_process: bool = false, // Init (PID 1)
     driver_process: bool = false, // User-space driver
-    _reserved: u5 = 0,
+    /// Capability minter — may call cap_mint to mint IRQ / IO-port /
+    /// MMIO / framebuffer caps from raw resources. Set once by the
+    /// kernel on the boot-loaded init process; there is no syscall to
+    /// set it later, so minting authority cannot be delegated.
+    minter_process: bool = false,
+    _reserved: u4 = 0,
 };
 
 /// Process pool — O(1) free-list allocator.

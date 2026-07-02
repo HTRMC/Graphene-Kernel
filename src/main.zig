@@ -42,6 +42,7 @@ const ipc = @import("lib/ipc.zig");
 const capability = @import("lib/capability.zig");
 const object = @import("lib/object.zig");
 const pci = @import("lib/pci.zig");
+const spawn = @import("lib/spawn.zig");
 
 /// Debug logging - only enabled in Debug builds
 const debug_enabled = builtin.mode == .Debug;
@@ -470,87 +471,22 @@ export fn _start() callconv(.c) noreturn {
     }
 }
 
-/// Load init process from boot module
+/// Load init process from boot module. Init is special: it is the only
+/// process the kernel grants the minter flag to, which lets it mint
+/// hardware caps (IRQ / IO-port / MMIO / framebuffer) and hand them to
+/// the services it spawns. This is the keystone of the move toward a
+/// user-space service manager.
 fn loadInitProcess(module: *limine.File) bool {
-    debugPrint("[DEBUG] loadInitProcess: starting");
+    const module_data: [*]const u8 = @ptrCast(module.address);
+    const data_slice = module_data[0..module.size];
 
-    // Get module data
-    const module_addr: u64 = @intFromPtr(module.address);
-    const module_size = module.size;
-
-    debugPuts("[DEBUG] Module addr: ");
-    debugHex(module_addr);
-    debugPuts(", size: ");
-    debugDec(module_size);
-    debugPuts("\n");
-
-    if (module_size == 0) {
-        printFail("Init module is empty");
-        return false;
-    }
-
-    // Create slice from module data
-    const module_data: [*]const u8 = @ptrFromInt(module_addr);
-    const data_slice = module_data[0..module_size];
-
-    debugPrint("[DEBUG] Checking if valid ELF...");
-
-    // Validate ELF
-    if (!elf.isElf(data_slice)) {
-        printFail("Init module is not a valid ELF");
-        return false;
-    }
-
-    debugPrint("[DEBUG] Creating process...");
-
-    // Create init process
-    const init_proc = process.create(null) orelse {
-        printFail("Failed to create init process");
+    const init_proc = spawn.fromElf(data_slice, .{ .name = "init", .minter = true }) orelse {
+        printFail("Failed to load init process");
         return false;
     };
 
-    debugPrint("[DEBUG] Process created, setting name...");
-
-    init_proc.setName("init");
+    // Mark PID 1 / init semantics. The minter flag was set by spawn.
     init_proc.flags.init_process = true;
-
-    // Get address space
-    const space = init_proc.address_space orelse {
-        printFail("Init process has no address space");
-        return false;
-    };
-
-    debugPrint("[DEBUG] Loading ELF into address space...");
-
-    // Load ELF into address space
-    const load_result = elf.load(space, data_slice) catch {
-        printFail("Failed to load init ELF");
-        process.destroy(init_proc);
-        return false;
-    };
-
-    debugPrint("[DEBUG] ELF loaded successfully");
-
-    // Allocate user stack
-    const stack_result = usermode.allocateUserStack(space) catch {
-        printFail("Failed to allocate user stack");
-        process.destroy(init_proc);
-        return false;
-    };
-    _ = stack_result;
-
-    // Create main thread for init
-    const init_thread = thread.createUser(init_proc, load_result.entry_point, usermode.USER_STACK_TOP - 8) orelse {
-        printFail("Failed to create init thread");
-        process.destroy(init_proc);
-        return false;
-    };
-
-    // Add thread to process
-    _ = init_proc.addThread(init_thread);
-
-    // Add to scheduler
-    scheduler.enqueue(init_thread);
 
     return true;
 }
@@ -652,112 +588,10 @@ fn grantSendCap(proc: *process.Process, endpoint: *ipc.Endpoint, slot: u32) bool
 
 /// Load a generic user process from boot module, return process pointer.
 fn loadUserProcessP(module: *limine.File, name: []const u8) ?*process.Process {
-    const module_addr: u64 = @intFromPtr(module.address);
-    const module_size = module.size;
+    const module_data: [*]const u8 = @ptrCast(module.address);
+    const data_slice = module_data[0..module.size];
 
-    if (module_size == 0) {
-        printFail("User module is empty");
-        return null;
-    }
-
-    const module_data: [*]const u8 = @ptrFromInt(module_addr);
-    const data_slice = module_data[0..module_size];
-
-    if (!elf.isElf(data_slice)) {
-        printFail("User module is not a valid ELF");
-        return null;
-    }
-
-    const user_proc = process.create(null) orelse {
-        printFail("Failed to create user process");
-        return null;
-    };
-
-    user_proc.setName(name);
-
-    const space = user_proc.address_space orelse {
-        printFail("User process has no address space");
-        process.destroy(user_proc);
-        return null;
-    };
-
-    const load_result = elf.load(space, data_slice) catch {
-        printFail("Failed to load user ELF");
-        process.destroy(user_proc);
-        return null;
-    };
-
-    _ = usermode.allocateUserStack(space) catch {
-        printFail("Failed to allocate user stack");
-        process.destroy(user_proc);
-        return null;
-    };
-
-    const user_thread = thread.createUser(user_proc, load_result.entry_point, usermode.USER_STACK_TOP - 8) orelse {
-        printFail("Failed to create user thread");
-        process.destroy(user_proc);
-        return null;
-    };
-
-    _ = user_proc.addThread(user_thread);
-    scheduler.enqueue(user_thread);
-
-    return user_proc;
-}
-
-/// Load a generic user process from boot module
-fn loadUserProcess(module: *limine.File, name: []const u8) bool {
-    const module_addr: u64 = @intFromPtr(module.address);
-    const module_size = module.size;
-
-    if (module_size == 0) {
-        printFail("User module is empty");
-        return false;
-    }
-
-    const module_data: [*]const u8 = @ptrFromInt(module_addr);
-    const data_slice = module_data[0..module_size];
-
-    if (!elf.isElf(data_slice)) {
-        printFail("User module is not a valid ELF");
-        return false;
-    }
-
-    const user_proc = process.create(null) orelse {
-        printFail("Failed to create user process");
-        return false;
-    };
-
-    user_proc.setName(name);
-
-    const space = user_proc.address_space orelse {
-        printFail("User process has no address space");
-        process.destroy(user_proc);
-        return false;
-    };
-
-    const load_result = elf.load(space, data_slice) catch {
-        printFail("Failed to load user ELF");
-        process.destroy(user_proc);
-        return false;
-    };
-
-    _ = usermode.allocateUserStack(space) catch {
-        printFail("Failed to allocate user stack");
-        process.destroy(user_proc);
-        return false;
-    };
-
-    const user_thread = thread.createUser(user_proc, load_result.entry_point, usermode.USER_STACK_TOP - 8) orelse {
-        printFail("Failed to create user thread");
-        process.destroy(user_proc);
-        return false;
-    };
-
-    _ = user_proc.addThread(user_thread);
-    scheduler.enqueue(user_thread);
-
-    return true;
+    return spawn.fromElf(data_slice, .{ .name = name });
 }
 
 /// Load a PCI driver process: ELF → driver_process → registerPciDriver
@@ -768,56 +602,17 @@ fn loadPciDriverProcess(
     driver_type: driver.DriverType,
     pci_dev: *const pci.Device,
 ) ?*process.Process {
-    const module_addr: u64 = @intFromPtr(module.address);
-    const module_size = module.size;
+    const module_data: [*]const u8 = @ptrCast(module.address);
+    const data_slice = module_data[0..module.size];
 
-    if (module_size == 0) {
-        printFail("PCI driver module is empty");
-        return null;
-    }
-
-    const module_data: [*]const u8 = @ptrFromInt(module_addr);
-    const data_slice = module_data[0..module_size];
-
-    if (!elf.isElf(data_slice)) {
-        printFail("PCI driver module is not a valid ELF");
-        return null;
-    }
-
-    const drv_proc = process.create(null) orelse {
-        printFail("Failed to create PCI driver process");
-        return null;
-    };
-
-    drv_proc.setName(name);
-    drv_proc.flags.driver_process = true;
-
-    const space = drv_proc.address_space orelse {
-        printFail("PCI driver process has no address space");
-        process.destroy(drv_proc);
-        return null;
-    };
-
-    const load_result = elf.load(space, data_slice) catch {
+    const drv_proc = spawn.fromElf(data_slice, .{ .name = name, .driver = true }) orelse {
         printFail("Failed to load PCI driver ELF");
-        process.destroy(drv_proc);
         return null;
     };
 
-    _ = usermode.allocateUserStack(space) catch {
-        printFail("Failed to allocate PCI driver stack");
-        process.destroy(drv_proc);
-        return null;
-    };
-
-    const drv_thread = thread.createUser(drv_proc, load_result.entry_point, usermode.USER_STACK_TOP - 8) orelse {
-        printFail("Failed to create PCI driver thread");
-        process.destroy(drv_proc);
-        return null;
-    };
-
-    _ = drv_proc.addThread(drv_thread);
-
+    // Grant hardware caps (IRQ + MMIO BAR + I/O port BAR) from the PCI
+    // device discovered at boot. registerPciDriver handles its own slot
+    // allocation and cleanup on failure.
     const entry = driver.registerPciDriver(name, driver_type, drv_proc, pci_dev);
     if (entry == null) {
         printFail("Failed to register PCI driver");
@@ -825,7 +620,6 @@ fn loadPciDriverProcess(
         return null;
     }
 
-    scheduler.enqueue(drv_thread);
     return drv_proc;
 }
 
@@ -838,64 +632,13 @@ fn loadDriverProcess(
     io_port_start: ?u16,
     io_port_count: u16,
 ) ?*process.Process {
-    // Get module data
-    const module_addr: u64 = @intFromPtr(module.address);
-    const module_size = module.size;
+    const module_data: [*]const u8 = @ptrCast(module.address);
+    const data_slice = module_data[0..module.size];
 
-    if (module_size == 0) {
-        printFail("Driver module is empty");
-        return null;
-    }
-
-    // Create slice from module data
-    const module_data: [*]const u8 = @ptrFromInt(module_addr);
-    const data_slice = module_data[0..module_size];
-
-    // Validate ELF
-    if (!elf.isElf(data_slice)) {
-        printFail("Driver module is not a valid ELF");
-        return null;
-    }
-
-    // Create driver process
-    const drv_proc = process.create(null) orelse {
-        printFail("Failed to create driver process");
-        return null;
-    };
-
-    drv_proc.setName(name);
-    drv_proc.flags.driver_process = true;
-
-    // Get address space
-    const space = drv_proc.address_space orelse {
-        printFail("Driver process has no address space");
-        process.destroy(drv_proc);
-        return null;
-    };
-
-    // Load ELF into address space
-    const load_result = elf.load(space, data_slice) catch {
+    const drv_proc = spawn.fromElf(data_slice, .{ .name = name, .driver = true }) orelse {
         printFail("Failed to load driver ELF");
-        process.destroy(drv_proc);
         return null;
     };
-
-    // Allocate user stack
-    _ = usermode.allocateUserStack(space) catch {
-        printFail("Failed to allocate driver stack");
-        process.destroy(drv_proc);
-        return null;
-    };
-
-    // Create main thread for driver
-    const drv_thread = thread.createUser(drv_proc, load_result.entry_point, usermode.USER_STACK_TOP - 8) orelse {
-        printFail("Failed to create driver thread");
-        process.destroy(drv_proc);
-        return null;
-    };
-
-    // Add thread to process
-    _ = drv_proc.addThread(drv_thread);
 
     // Register driver and grant capabilities
     const entry = driver.registerDriver(
@@ -912,9 +655,6 @@ fn loadDriverProcess(
         process.destroy(drv_proc);
         return null;
     }
-
-    // Add to scheduler
-    scheduler.enqueue(drv_thread);
 
     return drv_proc;
 }
